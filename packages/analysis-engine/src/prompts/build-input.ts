@@ -63,7 +63,10 @@ export function snapshotMove(snapshot: MarketSnapshot): number {
 }
 
 export function formatMove(percentChange: number): string {
-  const direction = percentChange >= 0 ? "firmer" : "softer";
+  if (Math.abs(percentChange) <= 0.1) {
+    return "little changed";
+  }
+  const direction = percentChange > 0 ? "higher" : "lower";
   return `${direction} by ${Math.abs(percentChange).toFixed(2)}%`;
 }
 

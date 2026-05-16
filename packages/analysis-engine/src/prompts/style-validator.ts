@@ -39,7 +39,8 @@ const genericPhraseRules: Array<[RegExp, string]> = [
   [/\bthe useful read is\b/i, "Use natural analyst phrasing."],
   [/\bthe right stance is caution\b/i, "Avoid advice-like canned phrasing."],
   [/\bthe desk would need\b/i, "Use 'A stronger explanation would require' instead."],
-  [/\bavailable live sources at the time of writing\b/i, "Use current-source-set phrasing."],
+  [/\bavailable live sources at the time of writing\b/i, "Use current live sources phrasing."],
+  [/\bthe source set\b/i, "Use current live sources phrasing."],
   [/\bsource set does not provide enough support\b/i, "Avoid mechanical source caveats."],
   [/\bstandalone confirmed story\b/i, "Use cleaner company-specific catalyst phrasing."]
 ];

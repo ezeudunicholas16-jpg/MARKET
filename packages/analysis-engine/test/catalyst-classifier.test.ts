@@ -41,7 +41,7 @@ describe("CatalystClassifier", () => {
           id: "src-live-source-warning",
           provider: "provider-router",
           type: "internal",
-          title: "There is no confirmed catalyst in the current source set.",
+          title: "There is no confirmed catalyst in the current live sources.",
           retrievedAt: new Date().toISOString(),
           credibilityScore: 100
         }
@@ -50,7 +50,7 @@ describe("CatalystClassifier", () => {
 
     expect(catalysts[0]?.classification).toBe("no_confirmed_catalyst");
     expect(catalysts[0]?.explanation).toBe(
-      "There is no confirmed catalyst in the current source set."
+      "There is no confirmed catalyst in the current live sources."
     );
   });
 });

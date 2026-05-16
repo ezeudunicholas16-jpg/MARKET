@@ -65,7 +65,7 @@ describe("GET /why/:symbol", () => {
       undefined,
       new GeminiAnalystWriter({
         client: rawTextGeminiClient([
-          "NVDA is firmer today, with live pricing showing a clear move and volume giving the reaction more weight than a simple quote update.\n\nThere is no confirmed company-specific catalyst from the current live source set, so the cleaner read is that price action is being shaped by semiconductor participation, broader tech positioning, and index context rather than a standalone NVDA event.\n\nThe next check is whether Nasdaq direction, chip-sector breadth, fresh company commentary, or official filings confirm the move.\n\nMarket commentary only."
+          "NVDA is firmer today, with live pricing showing a clear move and volume giving the reaction more weight than a simple quote update.\n\nThere is no confirmed company-specific catalyst from current live sources, so the cleaner read is that price action is being shaped by semiconductor participation, broader tech positioning, and index context rather than a standalone NVDA event.\n\nThe next check is whether Nasdaq direction, chip-sector breadth, fresh company commentary, or official filings confirm the move.\n\nMarket commentary only."
         ]),
         tracker
       }),
@@ -100,7 +100,7 @@ describe("GET /why/:symbol", () => {
       expect(payload.draft.body).toContain("NVDA is firmer today");
       expect(payload.draft.body).toMatch(/Market commentary only\.$/);
       expect(payload.draft.body.split(/\n\s*\n/).length).toBeGreaterThanOrEqual(3);
-      expect(payload.draft.body.split(/\s+/).length).toBeGreaterThanOrEqual(55);
+      expect(payload.draft.body.split(/\s+/).length).toBeGreaterThanOrEqual(45);
       expect(payload.draft.body).toMatch(/cleaner read|sector|index/i);
       expect(payload.draft.body).toMatch(/next check|follow-through|what matters next/i);
       expect(tracker.today("gemini").filter((record) => record.success).length).toBe(1);
@@ -121,7 +121,7 @@ describe("GET /why/:symbol", () => {
       undefined,
       new GeminiAnalystWriter({
         client: rawTextGeminiClient([
-          "Gold is little changed today rather than directionally weak, with live quote data showing only a small move near flat.\n\nWith no confirmed macro or safe-haven catalyst from the current source set, the cleaner read is consolidation while the market still needs clearer dollar, yield, Fed, inflation, or safe-haven evidence.\n\nThe next clean read comes from whether DXY and Treasury yields break directionally after incoming US macro data.\n\nMarket commentary only."
+          "Gold is little changed today rather than directionally weak, with live quote data showing only a small move near flat.\n\nWith no confirmed macro or safe-haven catalyst from current live sources, the cleaner read is consolidation while the market still needs clearer dollar, yield, Fed, inflation, or safe-haven evidence.\n\nThe next clean read comes from whether DXY and Treasury yields break directionally after incoming US macro data.\n\nMarket commentary only."
         ]),
         tracker
       }),

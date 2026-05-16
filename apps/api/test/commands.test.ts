@@ -146,6 +146,11 @@ describe("Telegram command behavior", () => {
     expect(result.text).toContain("Last rewrite attempted: false");
     expect(result.text).toContain("Last rewrite quality passed: false");
     expect(result.text).toContain("Last final writer used: template");
+    expect(result.text).toContain("Last Gemini original output word count: none");
+    expect(result.text).toContain("Last Gemini rewrite output word count: none");
+    expect(result.text).toContain("Last final output word count:");
+    expect(result.text).toContain("Last quality failure reasons:");
+    expect(result.text).toContain("Last quality text evaluated source: final");
     expect(result.text).toContain("Last Gemini error: Gemini failed with key=[redacted]");
     expect(result.text).toContain("Last AI fallback reason: Gemini failed with key=[redacted]");
     expect(result.text).not.toContain("test-secret");
@@ -200,6 +205,7 @@ describe("Telegram command behavior", () => {
     expect(result.text).toContain("Last original Gemini quality passed: true");
     expect(result.text).toContain("Last rewrite attempted: false");
     expect(result.text).toContain("Last final writer used: gemini");
+    expect(result.text).toContain("Last quality text evaluated source: original");
     expect(result.text).toContain("Last AI fallback reason: none");
   });
 

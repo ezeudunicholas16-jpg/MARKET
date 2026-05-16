@@ -11,8 +11,15 @@ import {
   debugGeminiFromEnv,
   evaluatePublicOutputQuality
 } from "../src";
+import { formatMove as promptFormatMove } from "../src/prompts/build-input";
 
 describe("GeminiAnalystWriter", () => {
+  it("formats price direction without misleading signs", () => {
+    expect(promptFormatMove(-4.42)).toBe("lower by 4.42%");
+    expect(promptFormatMove(2.1)).toBe("higher by 2.10%");
+    expect(promptFormatMove(-0.05)).toBe("little changed");
+  });
+
   it("initializes with Gemini status and configured client", () => {
     const writer = new GeminiAnalystWriter({
       client: fakeGeminiClient([]),
@@ -64,7 +71,7 @@ describe("GeminiAnalystWriter", () => {
             title: "NVDA no confirmed catalyst",
             body: [
               "NVDA is firmer today, with live pricing showing a clear move in the stock.",
-              "There is no confirmed company-specific catalyst from the current live source set, so the cleaner read is that price action is being shaped by semiconductor participation, broader tech tape positioning, and index context rather than a standalone NVDA event.",
+              "There is no confirmed company-specific catalyst from current live sources, so the cleaner read is that price action is being shaped by semiconductor participation, broader tech tape positioning, and index context rather than a standalone NVDA event.",
               "The next check is whether Nasdaq direction, chip-sector breadth, fresh company commentary, or official filings confirm the move.",
               "Market commentary only."
             ].join("\n\n"),
@@ -215,7 +222,12 @@ describe("GeminiAnalystWriter", () => {
 
     expect(calls).toBe(2);
     expect(draft.body).toContain("The next test");
-    expect(draft.body.split(/\s+/).length).toBeGreaterThanOrEqual(55);
+    expect(draft.body.split(/\s+/).length).toBeGreaterThanOrEqual(45);
+    expect(status.lastGeminiOriginalOutputWordCount).toBeLessThan(45);
+    expect(status.lastGeminiRewriteOutputWordCount).toBeGreaterThanOrEqual(45);
+    expect(status.lastFinalOutputWordCount).toBeGreaterThanOrEqual(45);
+    expect(status.lastQualityTextEvaluatedSource).toBe("rewrite");
+    expect(status.lastQualityFailureReasons).toContain("fewer than 45 words");
     expect(status.todayFallbackCount).toBe(0);
     expect(status.lastQualityCheckResult?.ok).toBe(true);
     expect(status.lastQualityRewriteAttempted).toBe(true);
@@ -242,6 +254,8 @@ describe("GeminiAnalystWriter", () => {
     expect(status.lastQualityRewritePassed).toBe(false);
     expect(status.lastFinalWriterUsed).toBe("gemini");
     expect(status.lastFallbackReason).toBeUndefined();
+    expect(status.lastQualityTextEvaluatedSource).toBe("original");
+    expect(status.lastQualityFailureReasons).toEqual([]);
     expect(status.todayFallbackCount).toBe(0);
   });
 
@@ -316,7 +330,7 @@ describe("GeminiAnalystWriter", () => {
           title: "No confirmed catalyst",
           body: [
             "NVDA is firmer today, with live pricing showing a clear move in the stock.",
-            "There is no confirmed company-specific catalyst in the current source set, so the cleaner read is positioning and broader tape participation rather than a standalone event.",
+            "There is no confirmed company-specific catalyst in current live sources, so the cleaner read is positioning and broader tape participation rather than a standalone event.",
             "The next check is whether a filing, credible company news, earnings detail, or clearer sector confirmation improves the explanation."
           ].join("\n\n"),
           sourcesUsed: ["src-market-mock"]
@@ -334,7 +348,7 @@ describe("GeminiAnalystWriter", () => {
   it("accepts next-clean-read language as a valid forward-looking check", () => {
     const text = [
       "Gold is little changed today rather than directionally weak, with live pricing showing a muted move near flat.",
-      "There is no clean confirmed catalyst from the current live source set, so the cleaner read is consolidation while the market still needs direction from DXY, Treasury yields, Fed expectations, inflation data, or safe-haven demand.",
+      "There is no clean confirmed catalyst from current live sources, so the cleaner read is consolidation while the market still needs direction from DXY, Treasury yields, Fed expectations, inflation data, or safe-haven demand.",
       "The next clean read comes from whether DXY and yields break directionally after incoming US macro data.",
       "Market commentary only."
     ].join("\n\n");
@@ -343,14 +357,13 @@ describe("GeminiAnalystWriter", () => {
 
     expect(quality.ok).toBe(true);
     expect(quality.hasWhatMattersNext).toBe(true);
-    expect(quality.wordCount).toBeGreaterThanOrEqual(55);
-    expect(quality.wordCount).toBeLessThanOrEqual(180);
+    expect(quality.wordCount).toBeGreaterThanOrEqual(45);
   });
 
   it("accepts next-check language as a valid catalyst/watch factor", () => {
     const text = [
       "NVDA is lower today, with live pricing showing a 4.42% decline on heavy volume.",
-      "There is no confirmed company-specific catalyst in the current source set, so the cleaner read is that the move is being shaped by broader tape pressure, positioning, or semiconductor participation. The wider market context matters here because tech weakness can amplify single-name moves.",
+      "There is no confirmed company-specific catalyst in current live sources, so the cleaner read is that the move is being shaped by broader tape pressure, positioning, or semiconductor participation. The wider market context matters here because tech weakness can amplify single-name moves.",
       "The next check is whether the weakness is confirmed by Nasdaq direction, semiconductor breadth, fresh AI-chip demand commentary, or company-specific news.",
       "Market commentary only."
     ].join("\n\n");
