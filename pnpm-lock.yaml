@@ -194,6 +194,9 @@ importers:
       '@market-desk/shared':
         specifier: workspace:*
         version: link:../shared
+      ioredis:
+        specifier: ^5.6.1
+        version: 5.10.1
     devDependencies:
       typescript:
         specifier: ^5.8.3

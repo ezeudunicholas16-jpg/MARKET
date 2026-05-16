@@ -1098,7 +1098,7 @@ export class GeminiAnalystWriter implements AnalystWriter {
         ? "Return plain text commentary only. Do not return JSON, markdown code fences, or labels. End with exactly: Market commentary only."
         : "Return the final note as plain text unless JSON is explicitly easier. If using JSON, keep it simple with a single text field.",
       publicOutput
-        ? "Minimum quality: 45 words. Target length: 85-140 words. Maximum: 180 words. Use 3 short paragraphs plus the required footer. Include price action, interpretation, and the next check or catalyst."
+        ? "Write a concise senior market analyst note in 3 short paragraphs plus the final line. Paragraph 1: state the asset move using live data. Paragraph 2: interpret the move using available market context. Paragraph 3: explain the next check/catalyst. Final line: Market commentary only. Length: 85-150 words. Do not return JSON unless explicitly requested. Do not return a one-line summary."
         : "Keep the internal note concise but analytical.",
       rewriteBody
         ? flags.includes("too_shallow")
@@ -1142,7 +1142,7 @@ export class GeminiAnalystWriter implements AnalystWriter {
         systemInstruction: promptDefinition.systemPrompt,
         responseMimeType: "text/plain",
         maxOutputTokens: this.maxOutputTokensPerRequest,
-        temperature: 0.35
+        temperature: 0.5
       }
     });
     const raw = response?.text;
@@ -1626,8 +1626,11 @@ export function evaluatePublicOutputQuality(text: string, mode: AnalysisMode): P
     !hasInterpretation;
   const reasons: string[] = [];
 
-  if (words < 45) {
-    reasons.push("fewer than 45 words");
+  if (words < 55) {
+    reasons.push("fewer than 55 words");
+  }
+  if (words > 180) {
+    reasons.push("more than 180 words");
   }
   if (!hasAssetMove) {
     reasons.push("missing asset move or price action");

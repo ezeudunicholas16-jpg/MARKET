@@ -21,6 +21,7 @@ import type {
   SectorProvider,
   SourceProvider
 } from "./index";
+import type Redis from "ioredis";
 
 export type ProviderCategory =
   | "market_data"
@@ -53,6 +54,13 @@ export interface ProviderHealthStatus {
   endpointCategory?: ProviderCategory;
   optionalSourceWarningCount?: number;
   lastOptionalSourceWarning?: string;
+  cooldownActive?: boolean;
+  cooldownEndsAt?: string;
+  requestsToday?: number;
+  requestsThisMinute?: number;
+  cachedQuoteCount?: number;
+  staleQuoteCount?: number;
+  lastQuoteSource?: "live" | "cache" | "stale-cache" | "none";
 }
 
 export interface ProviderHealthReporter {
@@ -85,6 +93,11 @@ export interface ProviderFactoryEnv {
   SECTOR_BACKUP_PROVIDER?: string;
   ALLOW_MOCK_PROVIDER_FALLBACK?: string;
   TWELVE_DATA_API_KEY?: string;
+  TWELVE_DATA_QUOTE_CACHE_TTL_SECONDS?: string;
+  TWELVE_DATA_SYMBOL_SEARCH_CACHE_TTL_SECONDS?: string;
+  TWELVE_DATA_MIN_REQUEST_INTERVAL_MS?: string;
+  TWELVE_DATA_MAX_REQUESTS_PER_MINUTE?: string;
+  TWELVE_DATA_MAX_REQUESTS_PER_DAY?: string;
   FMP_API_KEY?: string;
   ALPHA_VANTAGE_API_KEY?: string;
   FINNHUB_API_KEY?: string;
@@ -378,10 +391,25 @@ interface TwelveDataTimeSeriesResponse {
   message?: string;
 }
 
+type QuoteCacheEntry = { expiresAt: number; fetchedAt: number; quote: Quote };
+
 export class TwelveDataProvider extends HttpProviderBase implements MarketDataProvider {
   private readonly baseUrl = "https://api.twelvedata.com";
-  private readonly quoteCache = new Map<string, { expiresAt: number; quote: Quote }>();
+  private readonly quoteCache = new Map<string, QuoteCacheEntry>();
   private readonly searchCache = new Map<string, { expiresAt: number; symbol: string | null }>();
+  private readonly quoteCacheTtlMs = secondsFromEnv("TWELVE_DATA_QUOTE_CACHE_TTL_SECONDS", 300) * 1000;
+  private readonly searchCacheTtlMs = secondsFromEnv("TWELVE_DATA_SYMBOL_SEARCH_CACHE_TTL_SECONDS", 86_400) * 1000;
+  private readonly minRequestIntervalMs = numberFromProcessEnv("TWELVE_DATA_MIN_REQUEST_INTERVAL_MS", 1500);
+  private readonly maxRequestsPerMinute = numberFromProcessEnv("TWELVE_DATA_MAX_REQUESTS_PER_MINUTE", 6);
+  private readonly maxRequestsPerDay = numberFromProcessEnv("TWELVE_DATA_MAX_REQUESTS_PER_DAY", 700);
+  private readonly requestTimestamps: number[] = [];
+  private requestDay = new Date().toISOString().slice(0, 10);
+  private requestsToday = 0;
+  private lastRequestAt = 0;
+  private cooldownUntil = 0;
+  private lastQuoteSource: "live" | "cache" | "stale-cache" | "none" = "none";
+  private redisClient?: Redis | null;
+  private redisUnavailable = false;
 
   constructor(
     registry: LiveSourceRegistry,
@@ -414,46 +442,46 @@ export class TwelveDataProvider extends HttpProviderBase implements MarketDataPr
   }
 
   async getMovers(limit = 5): Promise<Quote[]> {
+    const cachedQuotes = this.cachedQuotes();
+    if (cachedQuotes.length > 0) {
+      return cachedQuotes
+        .sort((a, b) => Math.abs(b.percentChange) - Math.abs(a.percentChange))
+        .slice(0, limit);
+    }
+
     const watchlist = [
+      "SPX",
+      "NDX",
+      "DXY",
+      "GOLD",
+      "OIL",
       "AAPL",
       "NVDA",
       "TSLA",
       "MSFT",
-      "META",
-      "AMZN",
-      "GOOGL",
-      "AMD",
-      "EURUSD",
-      "GBPUSD",
-      "USDJPY",
-      "USDCAD",
-      "AUDUSD",
-      "GOLD",
-      "SILVER",
-      "OIL",
-      "NATGAS",
-      "SPX",
-      "NDX",
-      "DJI",
-      "DXY"
+      "EURUSD"
     ];
-    const quotes = (
-      await Promise.all(
-        watchlist.map((symbol) => {
-          const assetType = detectAssetType(symbol);
-          if (assetType === "forex") {
-            return this.getForexQuote(symbol);
-          }
-          if (assetType === "commodity") {
-            return this.getCommodityQuote(symbol);
-          }
-          if (assetType === "index") {
-            return this.getIndexMove(symbol);
-          }
-          return this.getEquityQuote(symbol);
-        })
-      )
-    ).filter(isQuote);
+    const quotes: Quote[] = [];
+    for (const symbol of watchlist) {
+      try {
+        const assetType = detectAssetType(symbol);
+        const quote =
+          assetType === "forex"
+            ? await this.getForexQuote(symbol)
+            : assetType === "commodity"
+              ? await this.getCommodityQuote(symbol)
+              : assetType === "index"
+                ? await this.getIndexMove(symbol)
+                : await this.getEquityQuote(symbol);
+        if (quote) {
+          quotes.push(quote);
+        }
+      } catch (error) {
+        if (error instanceof ProviderRateLimitError) {
+          break;
+        }
+      }
+    }
 
     return quotes
       .sort((a, b) => Math.abs(b.percentChange) - Math.abs(a.percentChange))
@@ -470,6 +498,10 @@ export class TwelveDataProvider extends HttpProviderBase implements MarketDataPr
       selectedProvider: "twelve_data",
       normalizedSymbol: quote?.providerSymbol ?? mapping.candidates[0],
       providerRequestStatus: quote ? "ok" : "not_found",
+      quoteSource: quote?.providerStatus?.quoteSource ?? this.lastQuoteSource,
+      rateLimitStatus: this.cooldownActive() ? "limited" : this.requestsThisMinute() >= this.maxRequestsPerMinute ? "limited" : "ok",
+      cooldownActive: this.cooldownActive(),
+      cooldownEndsAt: this.cooldownUntil ? new Date(this.cooldownUntil).toISOString() : undefined,
       sanitizedData: quote ? sanitizeQuoteForDebug(quote) : null,
       sourceTimestamps: quote?.asOf ? [quote.asOf] : [],
       providerErrors: this.getProviderHealth().map((item) => item.message).filter(Boolean)
@@ -483,30 +515,71 @@ export class TwelveDataProvider extends HttpProviderBase implements MarketDataPr
   ): Promise<Quote | null> {
     this.assertConfigured();
     const mapping = mapSymbolForTwelveData(input, assetClass);
-    const cacheKey = `${assetClass}:${mapping.normalized}`;
-    const cached = this.quoteCache.get(cacheKey);
+    const cacheKey = this.quoteCacheKey(mapping.normalized);
+    const cached = await this.readQuoteCache(cacheKey);
     if (!refresh && cached && cached.expiresAt > Date.now()) {
-      return cached.quote;
+      this.lastQuoteSource = "cache";
+      return this.withQuoteSource(cached.quote, "cache", false);
+    }
+
+    if (!refresh && this.cooldownActive()) {
+      if (cached) {
+        this.lastQuoteSource = "stale-cache";
+        this.reliability.recordStale("Twelve Data cooldown active; serving stale cached quote.");
+        return this.withQuoteSource(cached.quote, "stale-cache", true);
+      }
+      throw new ProviderRateLimitError(rateLimitMessage());
+    }
+
+    const guard = this.canMakeRequest();
+    if (!guard.allowed) {
+      this.startCooldown(guard.cooldownMs);
+      if (cached) {
+        this.lastQuoteSource = "stale-cache";
+        this.reliability.recordStale("Twelve Data request guard active; serving stale cached quote.");
+        return this.withQuoteSource(cached.quote, "stale-cache", true);
+      }
+      throw new ProviderRateLimitError(rateLimitMessage());
     }
 
     let lastError: unknown;
     for (const candidate of mapping.candidates) {
       try {
-        const providerSymbol = await this.resolveProviderSymbol(candidate, assetClass, refresh);
-        if (!providerSymbol) {
-          continue;
-        }
-
-        const quote = await this.fetchQuote(providerSymbol, mapping.normalized, assetClass);
+        const quote = await this.fetchQuote(candidate, mapping.normalized, assetClass);
         if (quote) {
-          this.quoteCache.set(cacheKey, { quote, expiresAt: Date.now() + 60_000 });
-          return quote;
+          await this.writeQuoteCache(cacheKey, quote);
+          this.lastQuoteSource = "live";
+          return this.withQuoteSource(quote, "live", false);
         }
       } catch (error) {
         lastError = error;
+        if (error instanceof ProviderAuthError || error instanceof ProviderRateLimitError) {
+          break;
+        }
+        try {
+          const providerSymbol = await this.resolveProviderSymbol(candidate, assetClass, refresh);
+          if (!providerSymbol || providerSymbol === candidate) {
+            continue;
+          }
+          const quote = await this.fetchQuote(providerSymbol, mapping.normalized, assetClass);
+          if (quote) {
+            await this.writeQuoteCache(cacheKey, quote);
+            this.lastQuoteSource = "live";
+            return this.withQuoteSource(quote, "live", false);
+          }
+        } catch (searchError) {
+          lastError = searchError;
+          if (searchError instanceof ProviderAuthError || searchError instanceof ProviderRateLimitError) {
+            break;
+          }
+        }
       }
     }
 
+    if (cached && lastError instanceof ProviderRateLimitError) {
+      this.lastQuoteSource = "stale-cache";
+      return this.withQuoteSource(cached.quote, "stale-cache", true);
+    }
     if (lastError && isProviderError(lastError)) {
       throw lastError;
     }
@@ -522,6 +595,7 @@ export class TwelveDataProvider extends HttpProviderBase implements MarketDataPr
       symbol: providerSymbol,
       apikey: this.apiKey ?? ""
     });
+    await this.beforeNetworkRequest();
     const row = await this.getJson<TwelveDataQuoteResponse>(`${this.baseUrl}/quote?${params.toString()}`);
     this.assertTwelveDataOk(row, providerSymbol);
     if (!row) {
@@ -576,40 +650,17 @@ export class TwelveDataProvider extends HttpProviderBase implements MarketDataPr
       return cached.symbol;
     }
 
-    let directSymbolWorks = false;
-    try {
-      directSymbolWorks = await this.symbolWorks(candidate);
-    } catch (error) {
-      if (error instanceof ProviderAuthError || error instanceof ProviderRateLimitError) {
-        throw error;
-      }
-    }
-
-    if (directSymbolWorks) {
-      this.searchCache.set(cacheKey, { symbol: candidate, expiresAt: Date.now() + 24 * 60 * 60 * 1000 });
-      return candidate;
-    }
-
     const params = new URLSearchParams({
       symbol: candidate,
       apikey: this.apiKey ?? ""
     });
+    await this.beforeNetworkRequest();
     const payload = await this.getJson<TwelveDataSearchResponse>(`${this.baseUrl}/symbol_search?${params.toString()}`);
     this.assertTwelveDataOk(payload, candidate);
     const match = payload?.data?.find((item) => item.symbol);
     const symbol = match?.symbol ?? null;
-    this.searchCache.set(cacheKey, { symbol, expiresAt: Date.now() + 24 * 60 * 60 * 1000 });
+    this.searchCache.set(cacheKey, { symbol, expiresAt: Date.now() + this.searchCacheTtlMs });
     return symbol;
-  }
-
-  private async symbolWorks(symbol: string): Promise<boolean> {
-    const params = new URLSearchParams({
-      symbol,
-      apikey: this.apiKey ?? ""
-    });
-    const payload = await this.getJson<TwelveDataQuoteResponse>(`${this.baseUrl}/price?${params.toString()}`);
-    this.assertTwelveDataOk(payload, symbol);
-    return Boolean(numberValue((payload as Record<string, unknown> | null)?.price));
   }
 
   private async percentChangeFromTimeSeries(symbol: string): Promise<number | undefined> {
@@ -619,6 +670,7 @@ export class TwelveDataProvider extends HttpProviderBase implements MarketDataPr
       outputsize: "2",
       apikey: this.apiKey ?? ""
     });
+    await this.beforeNetworkRequest();
     const payload = await this.getJson<TwelveDataTimeSeriesResponse>(`${this.baseUrl}/time_series?${params.toString()}`);
     this.assertTwelveDataOk(payload, symbol);
     const latest = payload?.values?.[0];
@@ -641,10 +693,198 @@ export class TwelveDataProvider extends HttpProviderBase implements MarketDataPr
       throw new ProviderAuthError(`Twelve Data authentication failed for ${symbol}.`);
     }
     if (payload.code === 429 || /rate limit|credits|too many/i.test(message)) {
-      this.reliability.recordRateLimit();
-      throw new ProviderRateLimitError(`Twelve Data rate limit reached for ${symbol}.`);
+      this.startCooldown(10 * 60 * 1000);
+      this.reliability.recordRateLimit(new Date(this.cooldownUntil).toISOString());
+      throw new ProviderRateLimitError(rateLimitMessage());
     }
     throw new ProviderResponseError(`Twelve Data response error for ${symbol}: ${message}`);
+  }
+
+  override getProviderHealth(): ProviderHealthStatus[] {
+    return super.getProviderHealth().map((item) => ({
+      ...item,
+      cooldownActive: this.cooldownActive(),
+      cooldownEndsAt: this.cooldownUntil ? new Date(this.cooldownUntil).toISOString() : undefined,
+      requestsToday: this.requestsTodayForCurrentDay(),
+      requestsThisMinute: this.requestsThisMinute(),
+      cachedQuoteCount: this.quoteCache.size,
+      staleQuoteCount: this.staleQuoteCount(),
+      lastQuoteSource: this.lastQuoteSource
+    }));
+  }
+
+  getCacheDebug(): Record<string, unknown> {
+    return {
+      quoteCacheKeysCount: this.quoteCache.size,
+      latestSnapshotCount: this.quoteCache.size,
+      staleSnapshotCount: this.staleQuoteCount(),
+      twelveDataCooldownActive: this.cooldownActive(),
+      twelveDataCooldownEndsAt: this.cooldownUntil ? new Date(this.cooldownUntil).toISOString() : null,
+      requestsToday: this.requestsTodayForCurrentDay(),
+      requestsThisMinute: this.requestsThisMinute(),
+      lastQuoteSource: this.lastQuoteSource
+    };
+  }
+
+  private async beforeNetworkRequest(): Promise<void> {
+    const guard = this.canMakeRequest();
+    if (!guard.allowed) {
+      this.startCooldown(guard.cooldownMs);
+      throw new ProviderRateLimitError(rateLimitMessage());
+    }
+    const waitMs = this.minRequestIntervalMs - (Date.now() - this.lastRequestAt);
+    if (waitMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
+    }
+    this.noteRequest();
+  }
+
+  private canMakeRequest(): { allowed: boolean; cooldownMs: number } {
+    if (this.cooldownActive()) {
+      return { allowed: false, cooldownMs: this.cooldownUntil - Date.now() };
+    }
+    if (this.requestsThisMinute() >= this.maxRequestsPerMinute) {
+      return { allowed: false, cooldownMs: 5 * 60 * 1000 };
+    }
+    if (this.requestsTodayForCurrentDay() >= this.maxRequestsPerDay) {
+      return { allowed: false, cooldownMs: 15 * 60 * 1000 };
+    }
+    return { allowed: true, cooldownMs: 0 };
+  }
+
+  private noteRequest(): void {
+    const now = Date.now();
+    this.lastRequestAt = now;
+    this.requestTimestamps.push(now);
+    this.requestsTodayForCurrentDay();
+    this.requestsToday += 1;
+  }
+
+  private requestsTodayForCurrentDay(): number {
+    const today = new Date().toISOString().slice(0, 10);
+    if (today !== this.requestDay) {
+      this.requestDay = today;
+      this.requestsToday = 0;
+    }
+    return this.requestsToday;
+  }
+
+  private requestsThisMinute(): number {
+    const cutoff = Date.now() - 60_000;
+    while (this.requestTimestamps.length > 0 && (this.requestTimestamps[0] ?? 0) < cutoff) {
+      this.requestTimestamps.shift();
+    }
+    return this.requestTimestamps.length;
+  }
+
+  private startCooldown(durationMs: number): void {
+    this.cooldownUntil = Math.max(this.cooldownUntil, Date.now() + durationMs);
+    this.reliability.recordRateLimit(new Date(this.cooldownUntil).toISOString());
+  }
+
+  private cooldownActive(): boolean {
+    return this.cooldownUntil > Date.now();
+  }
+
+  private cachedQuotes(): Quote[] {
+    return [...this.quoteCache.values()].map((entry) =>
+      this.withQuoteSource(entry.quote, entry.expiresAt > Date.now() ? "cache" : "stale-cache", entry.expiresAt <= Date.now())
+    );
+  }
+
+  private staleQuoteCount(): number {
+    const now = Date.now();
+    return [...this.quoteCache.values()].filter((entry) => entry.expiresAt <= now).length;
+  }
+
+  private withQuoteSource(quote: Quote, source: "live" | "cache" | "stale-cache", stale: boolean): Quote {
+    return {
+      ...quote,
+      isStale: stale || quote.isStale,
+      providerStatus: {
+        ...(quote.providerStatus ?? {}),
+        quoteSource: source,
+        cached: source !== "live",
+        cacheTtlSeconds: this.quoteCacheTtlMs / 1000
+      }
+    };
+  }
+
+  private quoteCacheKey(normalizedSymbol: string): string {
+    return `quote:twelve_data:${normalizedSymbol}`;
+  }
+
+  private async readQuoteCache(cacheKey: string): Promise<QuoteCacheEntry | undefined> {
+    const memoryEntry = this.quoteCache.get(cacheKey);
+    if (memoryEntry) {
+      return memoryEntry;
+    }
+
+    const redis = await this.getRedisClient();
+    if (!redis) {
+      return undefined;
+    }
+
+    try {
+      const raw = await redis.get(cacheKey);
+      if (!raw) {
+        return undefined;
+      }
+      const entry = JSON.parse(raw) as QuoteCacheEntry;
+      if (!entry?.quote || typeof entry.expiresAt !== "number") {
+        return undefined;
+      }
+      this.quoteCache.set(cacheKey, entry);
+      return entry;
+    } catch {
+      this.redisUnavailable = true;
+      return undefined;
+    }
+  }
+
+  private async writeQuoteCache(cacheKey: string, quote: Quote): Promise<void> {
+    const entry = { quote, fetchedAt: Date.now(), expiresAt: Date.now() + this.quoteCacheTtlMs };
+    this.quoteCache.set(cacheKey, entry);
+
+    const redis = await this.getRedisClient();
+    if (!redis) {
+      return;
+    }
+
+    try {
+      const staleRetentionSeconds = Math.max(3600, Math.ceil((this.quoteCacheTtlMs * 12) / 1000));
+      await redis.set(cacheKey, JSON.stringify(entry), "EX", staleRetentionSeconds);
+    } catch {
+      this.redisUnavailable = true;
+    }
+  }
+
+  private async getRedisClient(): Promise<Redis | null> {
+    if (this.redisUnavailable || !process.env.REDIS_URL) {
+      return null;
+    }
+    if (this.redisClient !== undefined) {
+      return this.redisClient;
+    }
+
+    try {
+      const module = await import("ioredis");
+      const RedisClient = module.default;
+      this.redisClient = new RedisClient(process.env.REDIS_URL, {
+        connectTimeout: 500,
+        enableOfflineQueue: false,
+        lazyConnect: false,
+        maxRetriesPerRequest: 1
+      });
+      this.redisClient.on("error", () => {
+        this.redisUnavailable = true;
+      });
+      return this.redisClient;
+    } catch {
+      this.redisUnavailable = true;
+      this.redisClient = null;
+      return null;
+    }
   }
 }
 
@@ -1629,6 +1869,27 @@ export class FallbackMarketDataProvider implements MarketDataProvider {
       providerErrors: ["No selected market data provider exposes debugAsset."]
     };
   }
+
+  getCacheDebug(): Record<string, unknown> {
+    for (const provider of this.providers) {
+      const cacheProvider = provider as MarketDataProvider & {
+        getCacheDebug?: () => Record<string, unknown>;
+      };
+      if (cacheProvider.getCacheDebug) {
+        return cacheProvider.getCacheDebug();
+      }
+    }
+    return {
+      quoteCacheKeysCount: 0,
+      latestSnapshotCount: 0,
+      staleSnapshotCount: 0,
+      twelveDataCooldownActive: false,
+      twelveDataCooldownEndsAt: null,
+      requestsToday: 0,
+      requestsThisMinute: 0,
+      lastQuoteSource: "none"
+    };
+  }
 }
 
 export class FallbackNewsProvider implements NewsProvider {
@@ -1984,7 +2245,10 @@ async function firstArray<TProvider, TResult>(
       if (result.length > 0) {
         return result;
       }
-    } catch {
+    } catch (error) {
+      if (error instanceof ProviderRateLimitError) {
+        throw error;
+      }
       // Optional providers should not block quote-led analysis.
     }
   }
@@ -2184,6 +2448,22 @@ function numberValue(value: unknown): number | undefined {
     return Number.isFinite(parsed) ? parsed : undefined;
   }
   return undefined;
+}
+
+function numberFromProcessEnv(key: string, fallback: number): number {
+  if (process.env.NODE_ENV === "test" && key === "TWELVE_DATA_MIN_REQUEST_INTERVAL_MS" && process.env[key] === undefined) {
+    return 0;
+  }
+  const value = Number(process.env[key]);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+function secondsFromEnv(key: string, fallback: number): number {
+  return numberFromProcessEnv(key, fallback);
+}
+
+function rateLimitMessage(): string {
+  return "Live quote refresh is temporarily rate-limited by Twelve Data. I'm using cached data where available and will resume fresh quotes after the cooldown.";
 }
 
 function parsePercent(value: unknown): number | undefined {

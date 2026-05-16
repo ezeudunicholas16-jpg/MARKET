@@ -107,4 +107,41 @@ describe("live provider routes", () => {
     expect(text).not.toContain("test-twelve-key");
     expect(text).not.toContain("test-gemini-key");
   });
+
+  it("/debug/cache exposes sanitized provider cache state", async () => {
+    process.env.NODE_ENV = "production";
+    process.env.LIVE_DATA_ENABLED = "true";
+    process.env.MARKET_DATA_PROVIDER = "twelve_data";
+    process.env.TWELVE_DATA_API_KEY = "test-twelve-key";
+    process.env.API_AUTH_REQUIRED = "false";
+    global.fetch = vi.fn(async () =>
+      Response.json({
+        symbol: "NVDA",
+        datetime: "2026-05-15",
+        close: "100",
+        previous_close: "95",
+        percent_change: "5.26"
+      })
+    ) as typeof fetch;
+    app = await buildApp();
+
+    await app.inject({ method: "GET", url: "/debug/provider/NVDA" });
+    const response = await app.inject({ method: "GET", url: "/debug/cache" });
+
+    expect(response.statusCode).toBe(200);
+    const text = response.body;
+    const payload = response.json() as {
+      quoteCacheKeysCount: number;
+      latestSnapshotCount: number;
+      staleSnapshotCount: number;
+      twelveDataCooldownStatus: { active: boolean; endsAt: string | null };
+      lastQuoteSource: string;
+    };
+    expect(payload.quoteCacheKeysCount).toBeGreaterThanOrEqual(1);
+    expect(payload.latestSnapshotCount).toBeGreaterThanOrEqual(1);
+    expect(payload.staleSnapshotCount).toBeGreaterThanOrEqual(0);
+    expect(payload.twelveDataCooldownStatus.active).toBe(false);
+    expect(payload.lastQuoteSource).toMatch(/live|cache/);
+    expect(text).not.toContain("test-twelve-key");
+  });
 });

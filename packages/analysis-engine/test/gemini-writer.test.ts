@@ -222,17 +222,38 @@ describe("GeminiAnalystWriter", () => {
 
     expect(calls).toBe(2);
     expect(draft.body).toContain("The next test");
-    expect(draft.body.split(/\s+/).length).toBeGreaterThanOrEqual(45);
-    expect(status.lastGeminiOriginalOutputWordCount).toBeLessThan(45);
-    expect(status.lastGeminiRewriteOutputWordCount).toBeGreaterThanOrEqual(45);
-    expect(status.lastFinalOutputWordCount).toBeGreaterThanOrEqual(45);
+    expect(draft.body.split(/\s+/).length).toBeGreaterThanOrEqual(55);
+    expect(status.lastGeminiOriginalOutputWordCount).toBeLessThan(55);
+    expect(status.lastGeminiRewriteOutputWordCount).toBeGreaterThanOrEqual(55);
+    expect(status.lastFinalOutputWordCount).toBeGreaterThanOrEqual(55);
     expect(status.lastQualityTextEvaluatedSource).toBe("rewrite");
-    expect(status.lastQualityFailureReasons).toContain("fewer than 45 words");
+    expect(status.lastQualityFailureReasons).toContain("fewer than 55 words");
     expect(status.todayFallbackCount).toBe(0);
     expect(status.lastQualityCheckResult?.ok).toBe(true);
     expect(status.lastQualityRewriteAttempted).toBe(true);
     expect(status.lastQualityRewritePassed).toBe(true);
     expect(status.lastFinalWriterUsed).toBe("gemini");
+  });
+
+  it("sends a three-paragraph public note instruction to Gemini", async () => {
+    let prompt = "";
+    const writer = new GeminiAnalystWriter({
+      client: {
+        models: {
+          async generateContent(input) {
+            prompt = String(input.contents);
+            return { text: publicNvdaText() };
+          }
+        }
+      },
+      tracker: new AiUsageTracker()
+    });
+
+    await writer.write(await inputForMode("public_telegram"));
+
+    expect(prompt).toContain("Write a concise senior market analyst note in 3 short paragraphs plus the final line.");
+    expect(prompt).toContain("Length: 85-150 words.");
+    expect(prompt).toContain("Do not return a one-line summary.");
   });
 
   it("does not attempt a quality rewrite when original Gemini output passes", async () => {
@@ -357,7 +378,7 @@ describe("GeminiAnalystWriter", () => {
 
     expect(quality.ok).toBe(true);
     expect(quality.hasWhatMattersNext).toBe(true);
-    expect(quality.wordCount).toBeGreaterThanOrEqual(45);
+    expect(quality.wordCount).toBeGreaterThanOrEqual(55);
   });
 
   it("accepts next-check language as a valid catalyst/watch factor", () => {

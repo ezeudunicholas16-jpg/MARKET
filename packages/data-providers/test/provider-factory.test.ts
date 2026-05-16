@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   LiveSourceRegistry,
   ProviderConfigError,
+  ProviderRateLimitError,
   ProviderResponseError,
   TwelveDataProvider,
   createMockProviderBundle,
@@ -10,9 +11,11 @@ import {
 } from "../src";
 
 const originalFetch = global.fetch;
+const originalEnv = { ...process.env };
 
 afterEach(() => {
   global.fetch = originalFetch;
+  process.env = { ...originalEnv };
   vi.restoreAllMocks();
 });
 
@@ -167,6 +170,47 @@ describe("createProviderBundleFromEnv", () => {
 
     await expect(provider.getEquityQuote("NVDA")).rejects.toBeInstanceOf(ProviderResponseError);
     await expect(provider.getEquityQuote("NVDA")).rejects.not.toThrow("super-secret-key");
+  });
+
+  it("starts cooldown when Twelve Data returns rate limit", async () => {
+    global.fetch = vi.fn(async () =>
+      Response.json({ status: "error", code: 429, message: "rate limit reached" })
+    ) as typeof fetch;
+    const provider = new TwelveDataProvider(new LiveSourceRegistry(), "secret-key");
+
+    await expect(provider.getForexQuote("EURUSD")).rejects.toBeInstanceOf(ProviderRateLimitError);
+    const health = provider.getProviderHealth()[0];
+
+    expect(health?.cooldownActive).toBe(true);
+    expect(health?.rateLimitStatus).toBe("limited");
+    expect(health?.message).not.toContain("secret-key");
+  });
+
+  it("uses cached quote during cooldown instead of hammering Twelve Data", async () => {
+    process.env.TWELVE_DATA_MAX_REQUESTS_PER_MINUTE = "1";
+    process.env.TWELVE_DATA_MIN_REQUEST_INTERVAL_MS = "0";
+    const fetchMock = vi.fn(async () =>
+      Response.json({
+        symbol: "NVDA",
+        datetime: "2026-05-15",
+        close: "100",
+        previous_close: "95",
+        percent_change: "5.26"
+      })
+    );
+    global.fetch = fetchMock as typeof fetch;
+    const provider = new TwelveDataProvider(new LiveSourceRegistry(), "secret-key");
+
+    const live = await provider.getEquityQuote("NVDA");
+    const cached = await provider.getEquityQuote("NVDA");
+    const stale = await provider.debugAsset("NVDA", true);
+
+    expect(live?.providerStatus?.quoteSource).toBe("live");
+    expect(cached?.providerStatus?.quoteSource).toBe("cache");
+    expect(stale.quoteSource).toBe("stale-cache");
+    expect((stale.sanitizedData as Record<string, unknown> | null)?.isStale).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(provider.getProviderHealth()[0]?.cooldownActive).toBe(true);
   });
 });
 

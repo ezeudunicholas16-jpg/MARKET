@@ -220,12 +220,19 @@ Set the matching keys:
 
 ```bash
 TWELVE_DATA_API_KEY=
+TWELVE_DATA_QUOTE_CACHE_TTL_SECONDS=300
+TWELVE_DATA_SYMBOL_SEARCH_CACHE_TTL_SECONDS=86400
+TWELVE_DATA_MIN_REQUEST_INTERVAL_MS=1500
+TWELVE_DATA_MAX_REQUESTS_PER_MINUTE=6
+TWELVE_DATA_MAX_REQUESTS_PER_DAY=700
 FINNHUB_API_KEY=
 FRED_API_KEY=
 SEC_USER_AGENT=MarketDeskEngine/0.1 ops@example.com
 ```
 
 If `NODE_ENV=production` and `LIVE_DATA_ENABLED=true`, the router does not silently fall back to mock data. Missing live-provider keys return clear provider configuration errors. Template fallback is only for writing, never for fake market data generation.
+
+Twelve Data is cache-first in production. Fresh quote cache is used before any provider call, stale cached quotes are used during cooldown, and the provider stops calling Twelve Data temporarily after rate-limit responses or local request-guard limits. Use `/status`, `/debug/cache`, and `/debug/provider/NVDA` to inspect cooldown and cache state without exposing API keys.
 
 Verify provider health:
 
@@ -372,6 +379,11 @@ NEWS_PROVIDER=finnhub
 MACRO_PROVIDER=fred
 FILINGS_PROVIDER=sec
 TWELVE_DATA_API_KEY=
+TWELVE_DATA_QUOTE_CACHE_TTL_SECONDS=300
+TWELVE_DATA_SYMBOL_SEARCH_CACHE_TTL_SECONDS=86400
+TWELVE_DATA_MIN_REQUEST_INTERVAL_MS=1500
+TWELVE_DATA_MAX_REQUESTS_PER_MINUTE=6
+TWELVE_DATA_MAX_REQUESTS_PER_DAY=700
 FINNHUB_API_KEY=
 FRED_API_KEY=
 SEC_USER_AGENT=
@@ -507,6 +519,11 @@ Required production keys:
 
 ```bash
 TWELVE_DATA_API_KEY=
+TWELVE_DATA_QUOTE_CACHE_TTL_SECONDS=300
+TWELVE_DATA_SYMBOL_SEARCH_CACHE_TTL_SECONDS=86400
+TWELVE_DATA_MIN_REQUEST_INTERVAL_MS=1500
+TWELVE_DATA_MAX_REQUESTS_PER_MINUTE=6
+TWELVE_DATA_MAX_REQUESTS_PER_DAY=700
 GEMINI_API_KEY=
 TELEGRAM_BOT_TOKEN=
 DATABASE_URL=

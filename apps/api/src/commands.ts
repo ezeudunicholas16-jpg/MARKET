@@ -1,6 +1,6 @@
 import { AnalysisPipeline, AnalysisResult } from "@market-desk/analysis-engine";
 import { ComplianceEngine, ensurePublicDisclaimer } from "@market-desk/compliance";
-import { MarketDataProvider, ProviderHealthReporter, ProviderHealthStatus } from "@market-desk/data-providers";
+import { MarketDataProvider, ProviderHealthReporter, ProviderHealthStatus, ProviderRateLimitError } from "@market-desk/data-providers";
 import { TelegramClient, ParsedTelegramCommand } from "@market-desk/telegram";
 import { PublishingService } from "./publishing";
 
@@ -82,6 +82,12 @@ export async function handleTelegramCommand(
         };
     }
   } catch (error) {
+    if (error instanceof ProviderRateLimitError) {
+      return {
+        status: "error",
+        text: "Live quote refresh is temporarily rate-limited by Twelve Data. I'm using cached data where available and will resume fresh quotes after the cooldown."
+      };
+    }
     return {
       status: "error",
       text: error instanceof Error ? error.message : "Command failed."
@@ -96,6 +102,7 @@ function statusText(context: CommandContext): string {
   const optionalWarnings = optionalSourceWarnings(health);
   const lastProviderError = latestProviderError(health);
   const lastOptionalWarning = latestOptionalSourceWarning(health);
+  const twelveDataHealth = health.find((item) => item.providerId.startsWith("twelve_data:"));
   return [
     "Market Desk Engine is online.",
     `Render/public URL: ${process.env.API_PUBLIC_URL || "not configured"}`,
@@ -140,6 +147,13 @@ function statusText(context: CommandContext): string {
     `Last provider error message: ${lastProviderError?.message ? sanitizeStatusMessage(lastProviderError.message) : "none"}`,
     `Last provider endpoint/category: ${lastProviderError?.endpointCategory ?? "none"}`,
     `Required provider error counts: ${providerErrorCounts(health)}`,
+    `Twelve Data cooldown active: ${twelveDataHealth?.cooldownActive ?? false}`,
+    `Twelve Data cooldown ends at: ${twelveDataHealth?.cooldownEndsAt ?? "none"}`,
+    `Twelve Data requests today: ${twelveDataHealth?.requestsToday ?? 0}`,
+    `Twelve Data requests this minute: ${twelveDataHealth?.requestsThisMinute ?? 0}`,
+    `Cached quote count: ${twelveDataHealth?.cachedQuoteCount ?? 0}`,
+    `Stale quote count: ${twelveDataHealth?.staleQuoteCount ?? 0}`,
+    `Last quote source: ${twelveDataHealth?.lastQuoteSource ?? "none"}`,
     `Publishing mode: ${process.env.PUBLISHING_MODE ?? "approval_required"}`,
     `Scheduler status: ${process.env.ENABLE_SCHEDULER === "true" ? "enabled" : "paused"}`
   ].join("\n");
@@ -217,11 +231,19 @@ async function moversText(provider: MarketDataProvider): Promise<string> {
   if (movers.length === 0) {
     return ensurePublicDisclaimer("No live movers were available from the configured provider. Check /status or /health/providers for provider configuration.");
   }
+  const hasStale = movers.some((quote) => quote.isStale || quote.providerStatus?.quoteSource === "stale-cache");
   const lines = movers.map(
     (quote, index) =>
       `${index + 1}. ${quote.symbol}: ${formatSignedPercent(quote.percentChange)} (${quote.assetClass})`
   );
-  return ensurePublicDisclaimer(["Top live movers", ...lines].join("\n"));
+  return ensurePublicDisclaimer(
+    [
+      hasStale
+        ? "Live mover scan is temporarily limited by provider rate limits. Showing latest cached snapshot where available."
+        : "Top live movers",
+      ...lines
+    ].join("\n")
+  );
 }
 
 async function marketBrief(context: CommandContext): Promise<string> {
@@ -235,6 +257,9 @@ async function marketBrief(context: CommandContext): Promise<string> {
   }
 
   const topMoverLines = movers.slice(0, 5).map((quote) => `${quote.symbol} ${formatSignedPercent(quote.percentChange)}`);
+  const cacheNote = movers.some((quote) => quote.isStale || quote.providerStatus?.quoteSource === "stale-cache")
+    ? "Live quote refresh is temporarily rate-limited by Twelve Data, so this brief uses cached data where available."
+    : undefined;
   const draft =
     strongest.assetClass === "forex"
       ? await context.pipeline.analyzeForex(strongest.symbol, "forex_reaction")
@@ -254,7 +279,9 @@ async function marketBrief(context: CommandContext): Promise<string> {
   }
 
   return ensurePublicDisclaimer(
-    [stripPublicDisclaimer(draft.draft.body), `Top monitored moves: ${topMoverLines.join(", ")}.`].join("\n\n")
+    [cacheNote, stripPublicDisclaimer(draft.draft.body), `Top monitored moves: ${topMoverLines.join(", ")}.`]
+      .filter(Boolean)
+      .join("\n\n")
   );
 }
 

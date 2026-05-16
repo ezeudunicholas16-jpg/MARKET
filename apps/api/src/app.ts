@@ -131,6 +131,25 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     };
   });
 
+  app.get("/debug/cache", { preHandler: requireRole(["viewer", "analyst", "admin"]) }, async () => {
+    const providerWithCacheDebug = services.providers.marketData as unknown as {
+      getCacheDebug?: () => Record<string, unknown>;
+    };
+    const providerDebug = providerWithCacheDebug.getCacheDebug?.() ?? {};
+    return {
+      quoteCacheKeysCount: providerDebug.quoteCacheKeysCount ?? 0,
+      latestSnapshotCount: providerDebug.latestSnapshotCount ?? 0,
+      staleSnapshotCount: providerDebug.staleSnapshotCount ?? 0,
+      twelveDataCooldownStatus: {
+        active: providerDebug.twelveDataCooldownActive ?? false,
+        endsAt: providerDebug.twelveDataCooldownEndsAt ?? null
+      },
+      requestsToday: providerDebug.requestsToday ?? 0,
+      requestsThisMinute: providerDebug.requestsThisMinute ?? 0,
+      lastQuoteSource: providerDebug.lastQuoteSource ?? "none"
+    };
+  });
+
   app.get("/debug/provider/:asset", { preHandler: requireRole(["viewer", "analyst", "admin"]) }, async (request) => {
     const params = z.object({ asset: z.string().min(1) }).parse(request.params);
     const query = z.object({ refresh: z.coerce.boolean().optional() }).parse(request.query);
@@ -170,6 +189,9 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
       requestedAsset: params.asset,
       detectedAssetType: assetType,
       quoteFound,
+      quoteSource: debugRecord?.quoteSource ?? quote?.providerStatus?.quoteSource ?? "none",
+      rateLimitStatus: debugRecord?.rateLimitStatus ?? "unknown",
+      cooldownActive: debugRecord?.cooldownActive ?? false,
       quoteProviderOk: quoteFound,
       selectedProvider: debugRecord?.selectedProvider ?? process.env.MARKET_DATA_PROVIDER ?? "provider_router",
       normalizedSymbol: debugRecord?.normalizedSymbol ?? quote?.providerSymbol ?? quote?.symbol,

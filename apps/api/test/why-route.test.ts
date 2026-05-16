@@ -100,7 +100,7 @@ describe("GET /why/:symbol", () => {
       expect(payload.draft.body).toContain("NVDA is firmer today");
       expect(payload.draft.body).toMatch(/Market commentary only\.$/);
       expect(payload.draft.body.split(/\n\s*\n/).length).toBeGreaterThanOrEqual(3);
-      expect(payload.draft.body.split(/\s+/).length).toBeGreaterThanOrEqual(45);
+      expect(payload.draft.body.split(/\s+/).length).toBeGreaterThanOrEqual(55);
       expect(payload.draft.body).toMatch(/cleaner read|sector|index/i);
       expect(payload.draft.body).toMatch(/next check|follow-through|what matters next/i);
       expect(tracker.today("gemini").filter((record) => record.success).length).toBe(1);
