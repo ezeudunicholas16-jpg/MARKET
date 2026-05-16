@@ -432,6 +432,9 @@ export interface AiUsageRecord {
   jsonParseRecovered?: boolean;
   responseMode?: "text" | "json";
   qualityCheckResult?: PublicOutputQualityResult;
+  qualityRewriteAttempted?: boolean;
+  qualityRewritePassed?: boolean;
+  finalWriterUsed?: "gemini" | "template";
   timestamp: string;
   error?: string;
   fallbackReason?: string;
@@ -456,6 +459,10 @@ export interface AiProviderStatus {
   lastGeminiJsonParseRecovered?: boolean;
   lastGeminiResponseMode?: "text" | "json";
   lastQualityCheckResult?: PublicOutputQualityResult;
+  lastQualityCheckPassed?: boolean;
+  lastQualityRewriteAttempted?: boolean;
+  lastQualityRewritePassed?: boolean;
+  lastFinalWriterUsed?: "gemini" | "template";
   lastFallbackReason?: string;
   lastGeminiError?: string;
   geminiConfigured?: boolean;
@@ -465,9 +472,11 @@ export interface PublicOutputQualityResult {
   ok: boolean;
   wordCount: number;
   paragraphCount: number;
+  hasAssetMove: boolean;
   hasInterpretation: boolean;
   hasWhatMattersNext: boolean;
   endsWithFooter: boolean;
+  hasBannedTradingAdvice: boolean;
   reasons: string[];
 }
 
@@ -531,7 +540,11 @@ export class OpenAIAnalystWriter implements AnalystWriter {
       lastGeminiRawResponseUsable: false,
       lastGeminiJsonParseRecovered: false,
       lastGeminiResponseMode: "text",
-      lastQualityCheckResult: undefined
+      lastQualityCheckResult: undefined,
+      lastQualityCheckPassed: undefined,
+      lastQualityRewriteAttempted: false,
+      lastQualityRewritePassed: false,
+      lastFinalWriterUsed: undefined
     };
   }
 
@@ -610,6 +623,10 @@ export class MockAnalystWriter implements AnalystWriter {
       lastGeminiJsonParseRecovered: false,
       lastGeminiResponseMode: "text",
       lastQualityCheckResult: undefined,
+      lastQualityCheckPassed: undefined,
+      lastQualityRewriteAttempted: false,
+      lastQualityRewritePassed: false,
+      lastFinalWriterUsed: "template",
       lastFallbackReason: "template writer selected"
     };
   }
@@ -694,7 +711,7 @@ export class MockAnalystWriter implements AnalystWriter {
     return [
       `${input.subject} is ${promptFormatMove(promptSnapshotMove(input.snapshot))}.`,
       `The move appears linked to ${input.primaryCatalyst.label.toLowerCase()}. ${this.evidenceLine(input)}`,
-      `The useful observation is that the move is not being framed off price alone. The read combines catalyst evidence with broader market context before assigning confidence at ${input.confidence.score}/100.`,
+      `The cleaner read is that price action should be checked against the available catalyst evidence and broader market context before assigning confidence at ${input.confidence.score}/100.`,
       `The next catalyst is whether fresh data confirms the current read or challenges it through the dollar, yields, sector direction, or company-specific news flow.`
     ].join("\n\n");
   }
@@ -798,14 +815,20 @@ export class MockAnalystWriter implements AnalystWriter {
     if (snapshot.assetClass === "commodity") {
       const isGold = /^(GOLD|XAUUSD|XAU\/USD)$/i.test(input.subject);
       const moveLine =
-        isGold && Math.abs(snapshot.percentChange) < 0.2
+        isGold && Math.abs(snapshot.percentChange) <= 0.1
           ? `${input.subject} is little changed rather than directionally weak. There is no clean confirmed catalyst from available live sources at the time of writing.`
           : `${input.subject} is ${promptFormatMove(snapshot.percentChange)}. There is no clean confirmed catalyst from available live sources at the time of writing.`;
+      if (isGold) {
+        return [
+          moveLine,
+          `The move looks more like consolidation while the market still needs clearer direction from the dollar, Treasury yields, Fed expectations, inflation data, or safe-haven demand.`,
+          `The next clean read comes from whether DXY and yields break directionally after incoming US macro data.`
+        ].join("\n\n");
+      }
       return [
         moveLine,
-        `For this commodity read, the important checks are the dollar, yields, macro data, inventory data, supply-demand inputs, and geopolitical risk. ${this.cleanPublicEvidence(snapshot.dollarContext.value)}; ${this.cleanPublicEvidence(snapshot.yieldContext.value)}.`,
-        `For gold specifically, consolidation around the dollar and yield path matters because the move can look firm without being tied to a clean safe-haven or inflation catalyst.`,
-        `A clearer dollar/yield shift, official inventory update, macro release, or credible supply-demand headline would change the confidence level.`
+        `The commodity read should stay anchored to the dollar, yields, macro data, inventories, supply-demand evidence, and geopolitical risk. ${this.cleanPublicEvidence(snapshot.dollarContext.value)}; ${this.cleanPublicEvidence(snapshot.yieldContext.value)}.`,
+        `The next clean read comes from an official inventory update, macro release, or credible supply-demand headline that changes the confidence level.`
       ].join("\n\n");
     }
 
@@ -814,14 +837,14 @@ export class MockAnalystWriter implements AnalystWriter {
         `${input.subject} is ${promptFormatMove(snapshot.percentChange)}. There is no clean confirmed catalyst from available live sources at the time of writing.`,
         `The FX read should stay anchored to dollar momentum, rates, yields, central-bank expectations, and scheduled macro data. ${this.cleanPublicEvidence(snapshot.dxyContext.value)}; ${this.cleanPublicEvidence(snapshot.yieldContext.value)}.`,
         `Without a confirmed macro release or central-bank headline, the pair should be described as moving on available price action rather than a clean fundamental catalyst.`,
-        `The next useful evidence would be a data print, policy comment, or clearer DXY/yield confirmation.`
+      `The next clean read comes from a data print, policy comment, or clearer DXY/yield confirmation.`
       ].join("\n\n");
     }
 
     return [
       `${input.subject} is ${promptFormatMove(promptSnapshotMove(input.snapshot))}. There is no clean confirmed catalyst from available live sources at the time of writing.`,
       `The available source checks do not support a clean company-specific, macro-driven, earnings-related, or supply-demand explanation yet.`,
-      `The right stance is caution: wait for a filing, official release, credible news item, or clearer macro alignment before assigning a stronger explanation.`
+      `The cleaner read needs a filing, official release, credible news item, or clearer macro alignment before assigning a stronger explanation.`
     ].join("\n\n");
   }
 
@@ -921,6 +944,10 @@ export class GeminiAnalystWriter implements AnalystWriter {
       lastGeminiJsonParseRecovered: last?.jsonParseRecovered ?? false,
       lastGeminiResponseMode: last?.responseMode ?? "text",
       lastQualityCheckResult: last?.qualityCheckResult,
+      lastQualityCheckPassed: last?.qualityCheckResult?.ok,
+      lastQualityRewriteAttempted: last?.qualityRewriteAttempted ?? false,
+      lastQualityRewritePassed: last?.qualityRewritePassed ?? false,
+      lastFinalWriterUsed: last?.finalWriterUsed,
       lastFallbackReason: last?.fallbackUsed ? last.fallbackReason : undefined,
       lastGeminiError: lastGeminiError?.error,
       geminiConfigured: Boolean(this.client)
@@ -929,6 +956,8 @@ export class GeminiAnalystWriter implements AnalystWriter {
 
   async write(input: AnalystWritingInput): Promise<AnalysisDraft> {
     const promptTokenEstimate = estimateTokens(JSON.stringify(buildGeminiFacts(input)));
+    let qualityRewriteAttempted = false;
+    let qualityRewritePassed = false;
     this.logRoute({
       selectedProvider: this.providerName,
       geminiConfigured: Boolean(this.client),
@@ -948,6 +977,7 @@ export class GeminiAnalystWriter implements AnalystWriter {
       let initial = await this.generateDraft(input);
       const initialQuality = evaluatePublicOutputQuality(initial.body, input.mode);
       if (!initialQuality.ok) {
+        qualityRewriteAttempted = true;
         const rewrittenForQuality = await this.tryQualityRewrite(input, initial, initialQuality);
         if (!rewrittenForQuality) {
           throw new Error(`Gemini output was too shallow: ${initialQuality.reasons.join(", ")}`);
@@ -956,6 +986,7 @@ export class GeminiAnalystWriter implements AnalystWriter {
         if (!rewrittenQuality.ok) {
           throw new Error(`Gemini rewrite was too shallow: ${rewrittenQuality.reasons.join(", ")}`);
         }
+        qualityRewritePassed = true;
         initial = rewrittenForQuality;
       }
 
@@ -993,7 +1024,10 @@ export class GeminiAnalystWriter implements AnalystWriter {
 
       return rewrittenCompliance.flags.length === 0 && rewrittenStyle.ok ? rewritten : initial;
     } catch (error) {
-      return this.writeWithFallback(input, errorMessage(error), promptTokenEstimate);
+      return this.writeWithFallback(input, errorMessage(error), promptTokenEstimate, {
+        attempted: qualityRewriteAttempted,
+        passed: qualityRewritePassed
+      });
     }
   }
 
@@ -1015,11 +1049,18 @@ export class GeminiAnalystWriter implements AnalystWriter {
         ? "Return plain text commentary only. Do not return JSON, markdown code fences, or labels. End with exactly: Market commentary only."
         : "Return the final note as plain text unless JSON is explicitly easier. If using JSON, keep it simple with a single text field.",
       publicOutput
-        ? "Minimum quality: at least 45 words, at least 2 paragraphs, an interpretation paragraph, and a final paragraph explaining what matters next."
+        ? "Minimum quality: 55 words. Target length: 85-140 words. Maximum: 180 words. Use 3 short paragraphs plus the required footer. Include price action, interpretation, and the next check or catalyst."
         : "Keep the internal note concise but analytical.",
       rewriteBody
         ? flags.includes("too_shallow")
-          ? "Your previous answer was too shallow. Rewrite as a concise senior market analyst note with context, interpretation, and what matters next."
+          ? [
+              "Rewrite this as a concise senior market analyst note in 3 short paragraphs.",
+              "Paragraph 1: state the move using live price data.",
+              "Paragraph 2: give interpretation using available context and explain whether the move has a confirmed catalyst or appears positioning/macro/sector-driven.",
+              "Paragraph 3: state what matters next.",
+              "End exactly with: Market commentary only.",
+              "Do not use buy/sell/signal language. Do not use generic filler."
+            ].join("\n")
           : "Rewrite the prior draft to remove compliance/style risk while preserving the evidence-led market read."
         : "Return a fresh draft.",
       JSON.stringify(
@@ -1076,6 +1117,7 @@ export class GeminiAnalystWriter implements AnalystWriter {
       evidenceSummaries: [...promptInput.evidence.map((item) => item.summary), ...promptInput.facts]
     });
     const qualityCheckResult = evaluatePublicOutputQuality(body, input.mode);
+    const qualityRewriteAttempted = flags.includes("too_shallow");
     this.tracker.record({
       providerName: this.providerName,
       model: this.model,
@@ -1087,7 +1129,10 @@ export class GeminiAnalystWriter implements AnalystWriter {
       rawResponseUsable: normalized.rawResponseUsable,
       jsonParseRecovered: normalized.jsonParseRecovered,
       responseMode: normalized.responseMode,
-      qualityCheckResult
+      qualityCheckResult,
+      qualityRewriteAttempted,
+      qualityRewritePassed: qualityRewriteAttempted ? qualityCheckResult.ok : false,
+      finalWriterUsed: "gemini"
     });
     this.logRoute({
       selectedProvider: this.providerName,
@@ -1143,7 +1188,8 @@ export class GeminiAnalystWriter implements AnalystWriter {
   private async writeWithFallback(
     input: AnalystWritingInput,
     reason: string,
-    promptTokenEstimate: number
+    promptTokenEstimate: number,
+    qualityRewrite: { attempted: boolean; passed: boolean } = { attempted: false, passed: false }
   ): Promise<AnalysisDraft> {
     const draft = await this.fallback.write(input);
     this.tracker.record({
@@ -1158,6 +1204,9 @@ export class GeminiAnalystWriter implements AnalystWriter {
       jsonParseRecovered: false,
       responseMode: "text",
       qualityCheckResult: evaluatePublicOutputQuality(draft.body, input.mode),
+      qualityRewriteAttempted: qualityRewrite.attempted,
+      qualityRewritePassed: qualityRewrite.passed,
+      finalWriterUsed: "template",
       error: sanitizeAiMessage(reason),
       fallbackReason: sanitizeAiMessage(reason)
     });
@@ -1243,7 +1292,11 @@ export class AnalysisPipeline {
       lastGeminiRawResponseUsable: false,
       lastGeminiJsonParseRecovered: false,
       lastGeminiResponseMode: "text",
-      lastQualityCheckResult: undefined
+      lastQualityCheckResult: undefined,
+      lastQualityCheckPassed: undefined,
+      lastQualityRewriteAttempted: false,
+      lastQualityRewritePassed: false,
+      lastFinalWriterUsed: undefined
     };
   }
 
@@ -1447,22 +1500,29 @@ export function evaluatePublicOutputQuality(text: string, mode: AnalysisMode): P
       ok: true,
       wordCount: countWords(text),
       paragraphCount: paragraphCount(text),
+      hasAssetMove: true,
       hasInterpretation: true,
       hasWhatMattersNext: true,
       endsWithFooter: true,
+      hasBannedTradingAdvice: false,
       reasons: []
     };
   }
 
   const words = countWords(text);
   const paragraphs = paragraphCount(text);
+  const hasAssetMove =
+    /(?:\b[A-Z]{2,6}\b|\bNVDA\b|\bGold\b|\bGOLD\b|\bOil\b|\bWTI\b|\bEUR\/?USD\b|\bGBP\/?USD\b).*?\b(is|are|trades?|moves?|declined|rose|gained|fell|higher|lower|firmer|softer|flat|muted|little changed|consolidat)/i.test(text) ||
+    /\b(price action|live pricing|live quote|percent move|%|volume)\b/i.test(text);
   const hasInterpretation =
-    /\b(cleaner read|appears|looks|suggests|reflects|linked to|shaped by|pressure|participation|positioning|broader tape|sector|index|macro|company-specific|not confirmed)\b/i.test(text);
+    /\b(cleaner read|appears|looks|suggests|reflects|linked to|shaped by|pressure|participation|positioning|broader tape|sector|index|macro|company-specific|not confirmed|confirmed catalyst|current source set does not show|market is pricing|consolidat|rate-driven|dollar|yield|safe-haven|standalone)\b/i.test(text);
   const hasWhatMattersNext =
-    /\b(what matters next|next (test|catalyst|useful evidence|read|focus)|watch|depends on|would need|will be whether|matters because|follow-through|earnings|filings|news|sector breadth|index direction|dxy|yields|fed|inflation|inventories|opec|supply risk)\b/i.test(text);
+    /\b(what matters next|the next (test|catalyst|check|clean read|useful evidence|read|focus)|the key check|key check is|the market now needs|a clearer shift in|next clean read comes from|next conditions?|watch|depends on|would need|will be whether|matters because|follow-through|earnings|filings|news|sector breadth|index direction|nasdaq direction|semiconductor breadth|dxy|yields|fed|inflation|inventories|opec|supply risk|incoming .*data|fresh .*commentary|company-specific news)\b/i.test(text);
   const endsWithFooter = /Market commentary only\.\s*$/i.test(text);
+  const hasBannedTradingAdvice =
+    /\b(buy|sell|long this|short this|entry|signal|pump|moon|guaranteed|risk-free|easy money|must buy|load up|this will definitely|financial advice)\b/i.test(text);
   const onlyRestatesPrice =
-    /\b(shares?|stock|gold|oil|natural gas|pair|asset)\b/i.test(text) &&
+    hasAssetMove &&
     /\b(declined|rose|gained|fell|up|down|firmer|softer|little changed)\b/i.test(text) &&
     !hasInterpretation;
   const reasons: string[] = [];
@@ -1470,8 +1530,14 @@ export function evaluatePublicOutputQuality(text: string, mode: AnalysisMode): P
   if (paragraphs < 2) {
     reasons.push("fewer than 2 paragraphs");
   }
-  if (words < 45) {
-    reasons.push("fewer than 45 words");
+  if (words < 55) {
+    reasons.push("fewer than 55 words");
+  }
+  if (words > 180) {
+    reasons.push("more than 180 words");
+  }
+  if (!hasAssetMove) {
+    reasons.push("missing asset move or price action");
   }
   if (onlyRestatesPrice) {
     reasons.push("only restates price movement");
@@ -1485,14 +1551,19 @@ export function evaluatePublicOutputQuality(text: string, mode: AnalysisMode): P
   if (!endsWithFooter) {
     reasons.push("missing required footer");
   }
+  if (hasBannedTradingAdvice) {
+    reasons.push("contains banned trading advice language");
+  }
 
   return {
     ok: reasons.length === 0,
     wordCount: words,
     paragraphCount: paragraphs,
+    hasAssetMove,
     hasInterpretation,
     hasWhatMattersNext,
     endsWithFooter,
+    hasBannedTradingAdvice,
     reasons
   };
 }
@@ -1615,6 +1686,15 @@ function formatMove(percentChange: number): string {
   return `${direction} ${Math.abs(percentChange).toFixed(2)}%`;
 }
 
+function describeSnapshotMove(snapshot: MarketSnapshot): string {
+  const subject =
+    snapshot.assetClass === "equity" ? snapshot.symbol : snapshot.assetClass === "forex" ? snapshot.pair : snapshot.asset;
+  if (snapshot.assetClass === "commodity" && /^(GOLD|XAUUSD|XAU\/USD)$/i.test(subject) && Math.abs(snapshot.percentChange) <= 0.1) {
+    return "little changed";
+  }
+  return formatMove(snapshot.percentChange);
+}
+
 function snapshotMove(snapshot: MarketSnapshot): number {
   return snapshot.percentChange;
 }
@@ -1630,7 +1710,7 @@ function buildGeminiFacts(input: AnalystWritingInput): Record<string, unknown> {
     assetType: snapshot.assetClass,
     normalizedSymbol: snapshot.normalizedSymbol,
     currentPrice: "price" in snapshot ? snapshot.price ?? null : null,
-    priceMove: formatMove(snapshot.percentChange),
+    priceMove: describeSnapshotMove(snapshot),
     percentChange: snapshot.percentChange,
     absoluteChange:
       "price" in snapshot && typeof snapshot.price === "number" && typeof snapshot.previousClose === "number"

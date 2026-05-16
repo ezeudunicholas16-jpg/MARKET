@@ -26,6 +26,7 @@ const publicStyleRules = [
   "Write like a senior market analyst after reviewing structured price action, macro context, news, filings, and sector data.",
   "Be concise, precise, and evidence-led.",
   "Public commentary should normally be three short paragraphs: move, interpretation, and what matters next.",
+  "Target 85-140 words for public commentary, with a hard minimum of 55 words and a hard maximum of 180 words.",
   "Do not stop at a quote recap. Always explain the likely market read using available evidence and clearly say when a company-specific or macro catalyst is not confirmed.",
   "Do not sound like a chatbot. Do not use generic filler or basic finance lessons.",
   "No trade recommendations, no buy/sell language, no entries, no signals, no price targets, no hype.",
@@ -46,7 +47,7 @@ const researchStyleRules = [
 
 const modeGuidance: Record<AnalysisMode, string> = {
   public_telegram:
-    "Produce 3 short paragraphs. Paragraph 1 states the asset move with price, percent move, and volume if available. Paragraph 2 gives interpretation, including whether the move looks like positioning, index/sector pressure, broader tape weakness, or a confirmed catalyst. Paragraph 3 explains what matters next. No heading.",
+    "Produce 3 short paragraphs. Paragraph 1 states the asset move with price, percent move, and volume if available. Paragraph 2 gives interpretation, including whether the move looks like positioning, index/sector pressure, broader tape weakness, or a confirmed catalyst. Paragraph 3 explains the next check or catalyst. No heading.",
   x_short:
     "Produce one compact post under 280 characters. Include the main move, catalyst, evidence anchor, and required footer. No heading.",
   private_research:
@@ -60,7 +61,7 @@ const modeGuidance: Record<AnalysisMode, string> = {
   no_confirmed_catalyst:
     "Make the absence of confirmation explicit without sounding robotic. Explain what is known from price action, what is not confirmed in news/filings/macro evidence, and what evidence would change the read. Use cautious language.",
   commodity_reaction:
-    "Focus on dollar/yield context, inventories, supply-demand, geopolitical inputs, and whether the move is macro-driven or commodity-specific. For gold, discuss DXY, yields, Fed expectations, inflation data, safe-haven demand, and consolidation when the move is small.",
+    "Focus on dollar/yield context, inventories, supply-demand, geopolitical inputs, and whether the move is macro-driven or commodity-specific. For gold, discuss DXY, yields, Fed expectations, inflation data, safe-haven demand, and consolidation when the move is small. Do not mention inventories or supply-demand for gold unless those fields contain actual evidence.",
   forex_reaction:
     "Focus on DXY, yield differentials, central-bank expectations, macro calendar, and what would challenge the currency move.",
   equity_mover_reaction:

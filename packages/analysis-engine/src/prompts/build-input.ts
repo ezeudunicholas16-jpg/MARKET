@@ -94,7 +94,7 @@ function snapshotFacts(snapshot: MarketSnapshot): string[] {
   }
 
   return [
-    `${snapshot.asset} is ${formatMove(snapshot.percentChange)}.`,
+    `${snapshot.asset} is ${formatCommodityMove(snapshot.asset, snapshot.percentChange)}.`,
     `${snapshot.dollarContext.label}: ${snapshot.dollarContext.value}`,
     `${snapshot.yieldContext.label}: ${snapshot.yieldContext.value}`,
     `${snapshot.inventoryContext.label}: ${snapshot.inventoryContext.value}`,
@@ -105,4 +105,11 @@ function snapshotFacts(snapshot: MarketSnapshot): string[] {
 
 function signedPercent(value: number): string {
   return `${value >= 0 ? "+" : ""}${value.toFixed(2)}%`;
+}
+
+function formatCommodityMove(asset: string, percentChange: number): string {
+  if (/^(GOLD|XAUUSD|XAU\/USD)$/i.test(asset) && Math.abs(percentChange) <= 0.1) {
+    return "little changed";
+  }
+  return formatMove(percentChange);
 }

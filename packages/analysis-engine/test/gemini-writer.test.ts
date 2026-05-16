@@ -8,7 +8,8 @@ import {
   ConfidenceEngine,
   GeminiAnalystWriter,
   GeminiGenerateClient,
-  debugGeminiFromEnv
+  debugGeminiFromEnv,
+  evaluatePublicOutputQuality
 } from "../src";
 
 describe("GeminiAnalystWriter", () => {
@@ -62,9 +63,10 @@ describe("GeminiAnalystWriter", () => {
           {
             title: "NVDA no confirmed catalyst",
             body: [
-              "NVDA is firmer today. There is no clean confirmed catalyst from available live sources at the time of writing.",
-              "The equity read should stay anchored to price action, semiconductor participation, and the broader tech tape because no company-specific headline or filing is confirming the move.",
-              "A clearer update would be credible news, a filing, earnings detail, or sector follow-through."
+              "NVDA is firmer today, with live pricing showing a clear move in the stock.",
+              "There is no confirmed company-specific catalyst from the current live source set, so the cleaner read is that price action is being shaped by semiconductor participation, broader tech tape positioning, and index context rather than a standalone NVDA event.",
+              "The next check is whether Nasdaq direction, chip-sector breadth, fresh company commentary, or official filings confirm the move.",
+              "Market commentary only."
             ].join("\n\n"),
             sourcesUsed: ["src-market-mock"]
           }
@@ -91,11 +93,7 @@ describe("GeminiAnalystWriter", () => {
       client: fakeGeminiClient([
         {
           title: "NVDA desk read",
-          body: [
-            "NVDA is firmer today as earnings context and sector participation support the move.",
-            "The move appears linked to data-center demand commentary, with relative volume confirming that the reaction is not just index drift.",
-            "The next test is whether the same evidence keeps showing up in sector follow-through and company commentary."
-          ].join("\n\n"),
+          body: publicNvdaText(),
           sourcesUsed: ["src-earnings-nvda"]
         }
       ]),
@@ -213,9 +211,12 @@ describe("GeminiAnalystWriter", () => {
 
     expect(calls).toBe(2);
     expect(draft.body).toContain("The next test");
-    expect(draft.body.split(/\s+/).length).toBeGreaterThanOrEqual(45);
+    expect(draft.body.split(/\s+/).length).toBeGreaterThanOrEqual(55);
     expect(status.todayFallbackCount).toBe(0);
     expect(status.lastQualityCheckResult?.ok).toBe(true);
+    expect(status.lastQualityRewriteAttempted).toBe(true);
+    expect(status.lastQualityRewritePassed).toBe(true);
+    expect(status.lastFinalWriterUsed).toBe("gemini");
   });
 
   it("returns valid public Telegram output from structured Gemini JSON", async () => {
@@ -223,11 +224,7 @@ describe("GeminiAnalystWriter", () => {
       client: fakeGeminiClient([
         {
           title: "NVDA desk read",
-          body: [
-            "NVDA is firmer today as earnings context and sector participation support the move.",
-            "The move appears linked to data-center demand commentary, with relative volume confirming that the reaction is not just index drift.",
-            "The next test is whether the same evidence keeps showing up in sector follow-through and company commentary."
-          ].join("\n\n"),
+          body: publicNvdaText(),
           sourcesUsed: ["src-earnings-nvda"]
         }
       ]),
@@ -263,8 +260,8 @@ describe("GeminiAnalystWriter", () => {
           title: "No confirmed catalyst",
           body: [
             "NVDA is firmer today. There is no clean confirmed catalyst from available live sources at the time of writing.",
-            "Price action is visible, but the source set does not confirm a company-specific, macro, earnings, or sector driver.",
-            "The next useful update would be a filing, credible news item, earnings detail, or clearer sector confirmation."
+            "The current source set does not show a confirmed company-specific, macro, earnings, or sector driver, so the cleaner read is positioning and broader tape participation rather than a standalone event.",
+            "The next clean read comes from a filing, credible company news, earnings detail, or clearer sector confirmation."
           ].join("\n\n"),
           sourcesUsed: ["src-market-mock"]
         }
@@ -275,6 +272,31 @@ describe("GeminiAnalystWriter", () => {
 
     expect(draft.catalyst.classification).toBe("no_confirmed_catalyst");
     expect(draft.body).toContain("There is no clean confirmed catalyst");
+    expect(draft.body).toMatch(/Market commentary only\.$/);
+  });
+
+  it("accepts next-clean-read language as a valid forward-looking check", () => {
+    const text = [
+      "Gold is little changed today rather than directionally weak, with live pricing showing a muted move near flat.",
+      "There is no clean confirmed catalyst from the current live source set, so the cleaner read is consolidation while the market still needs direction from DXY, Treasury yields, Fed expectations, inflation data, or safe-haven demand.",
+      "The next clean read comes from whether DXY and yields break directionally after incoming US macro data.",
+      "Market commentary only."
+    ].join("\n\n");
+
+    const quality = evaluatePublicOutputQuality(text, "commodity_reaction");
+
+    expect(quality.ok).toBe(true);
+    expect(quality.hasWhatMattersNext).toBe(true);
+    expect(quality.wordCount).toBeGreaterThanOrEqual(55);
+    expect(quality.wordCount).toBeLessThanOrEqual(180);
+  });
+
+  it("uses little-changed language for tiny GOLD moves in template fallback", async () => {
+    const writer = new GeminiAnalystWriter({ tracker: new AiUsageTracker() });
+    const draft = await writer.write(await commodityInputForGoldMove(-0.05));
+
+    expect(draft.body).toContain("little changed");
+    expect(draft.body).not.toMatch(/\bsofter\b|\bweaker\b/i);
     expect(draft.body).toMatch(/Market commentary only\.$/);
   });
 
@@ -324,9 +346,9 @@ function fakeGeminiClient(responses: unknown[], error?: Error, onCall?: () => vo
 
 function publicNvdaText(): string {
   return [
-    "NVDA is firmer today as semiconductor participation supports the move.",
-    "The move appears linked to company and sector context, with relative volume giving the reaction more weight than a simple index drift.",
-    "The next test is whether fresh company commentary or sector follow-through confirms the move.",
+    "NVDA is firmer today, with live pricing showing a clear move in the stock and volume giving the reaction more weight than a simple quote update.",
+    "The cleaner read is that semiconductor participation, index context, and company-specific evidence need to be considered together before treating the move as a standalone NVDA story.",
+    "The next test is whether fresh company commentary, sector breadth, Nasdaq direction, or official filings confirm the move.",
     "Market commentary only."
   ].join("\n\n");
 }
@@ -369,4 +391,48 @@ async function inputForMode(mode: AnalysisMode) {
     catalysts,
     confidence: confidenceEngine.score(snapshot, catalysts)
   };
+}
+
+async function commodityInputForGoldMove(percentChange: number) {
+  const base = createMockProviderBundle();
+  const snapshots = new MarketSnapshotService({
+    ...base,
+    marketData: {
+      ...base.marketData,
+      async getCommodityQuote() {
+        return {
+          symbol: "GOLD",
+          assetClass: "commodity" as const,
+          price: 2400,
+          percentChange,
+          sourceId: "src-twelve-gold",
+          sourceName: "twelve_data",
+          asOf: new Date().toISOString()
+        };
+      }
+    }
+  });
+  const snapshot = await snapshots.getCommoditySnapshot("GOLD");
+  const weakCatalyst: CatalystCandidate = {
+    classification: "no_confirmed_catalyst",
+    label: "No confirmed catalyst",
+    evidence: [
+      {
+        sourceId: "src-twelve-gold",
+        kind: "market_data",
+        summary: "Live quote data is available, but source evidence does not confirm a clean catalyst.",
+        weight: 0.25
+      }
+    ],
+    confidenceScore: 35,
+    sourceIds: ["src-twelve-gold"],
+    explanation: "No source evidence confirms the move."
+  };
+  const weakConfidence: ConfidenceResult = {
+    score: 35,
+    band: "weak",
+    rationale: "No confirmed catalyst was found in the structured evidence set.",
+    requiresReview: true
+  };
+  return { mode: "commodity_reaction" as const, snapshot, catalysts: [weakCatalyst], confidence: weakConfidence };
 }
