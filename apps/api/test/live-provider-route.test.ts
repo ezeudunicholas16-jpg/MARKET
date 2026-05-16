@@ -16,6 +16,35 @@ describe("live provider routes", () => {
     vi.restoreAllMocks();
   });
 
+  it("/debug/ai/gemini exists and returns sanitized missing-key status", async () => {
+    process.env.API_AUTH_REQUIRED = "false";
+    process.env.GEMINI_API_KEY = "";
+    process.env.GEMINI_MODEL_PRIMARY = "gemini-2.5-flash";
+    app = await buildApp();
+
+    const response = await app.inject({ method: "GET", url: "/debug/ai/gemini" });
+
+    expect(response.statusCode).toBe(200);
+    const payload = response.json() as {
+      provider: string;
+      model: string;
+      configured: boolean;
+      apiKeyPresent: boolean;
+      callAttempted: boolean;
+      success: boolean;
+      fallbackWouldBeUsed: boolean;
+      errorMessage: string;
+    };
+    expect(payload.provider).toBe("gemini");
+    expect(payload.model).toBe("gemini-2.5-flash");
+    expect(payload.configured).toBe(false);
+    expect(payload.apiKeyPresent).toBe(false);
+    expect(payload.callAttempted).toBe(false);
+    expect(payload.success).toBe(false);
+    expect(payload.fallbackWouldBeUsed).toBe(true);
+    expect(payload.errorMessage).not.toContain("test-gemini-key");
+  });
+
   it("/debug/provider returns sanitized Twelve Data provider info", async () => {
     process.env.NODE_ENV = "production";
     process.env.LIVE_DATA_ENABLED = "true";

@@ -7,7 +7,8 @@ import {
   CatalystClassifier,
   ConfidenceEngine,
   GeminiAnalystWriter,
-  GeminiGenerateClient
+  GeminiGenerateClient,
+  debugGeminiFromEnv
 } from "../src";
 
 describe("GeminiAnalystWriter", () => {
@@ -32,6 +33,7 @@ describe("GeminiAnalystWriter", () => {
     const draft = await writer.write(await inputForMode("public_telegram"));
 
     expect(draft.body).toContain("Market commentary only.");
+    expect(writer.getStatus().todayAttemptedAiCalls).toBe(0);
     expect(writer.getStatus().todayAiCalls).toBe(0);
     expect(writer.getStatus().todayFallbackCount).toBe(1);
   });
@@ -45,9 +47,11 @@ describe("GeminiAnalystWriter", () => {
     const draft = await writer.write(await inputForMode("public_telegram"));
 
     expect(draft.body).toContain("Market commentary only.");
+    expect(writer.getStatus().todayAttemptedAiCalls).toBe(1);
     expect(writer.getStatus().todayFallbackCount).toBe(1);
     expect(writer.getStatus().recentUsage[0]?.fallbackUsed).toBe(true);
     expect(writer.getStatus().lastFallbackReason).toContain("429 rate limit");
+    expect(writer.getStatus().lastGeminiError).toContain("429 rate limit");
   });
 
   it("calls Gemini when quote data exists and catalyst is no_confirmed_catalyst", async () => {
@@ -77,6 +81,7 @@ describe("GeminiAnalystWriter", () => {
 
     expect(calls).toBe(1);
     expect(draft.body).toContain("NVDA");
+    expect(writer.getStatus().todayAttemptedAiCalls).toBe(1);
     expect(writer.getStatus().todayAiCalls).toBe(1);
     expect(writer.getStatus().todayFallbackCount).toBe(0);
   });
@@ -99,6 +104,7 @@ describe("GeminiAnalystWriter", () => {
 
     await writer.write(await inputForMode("public_telegram"));
 
+    expect(writer.getStatus().todayAttemptedAiCalls).toBe(1);
     expect(writer.getStatus().todayAiCalls).toBe(1);
     expect(writer.getStatus().todayFallbackCount).toBe(0);
     expect(writer.getStatus().recentUsage[0]?.fallbackUsed).toBe(false);
@@ -162,6 +168,34 @@ describe("GeminiAnalystWriter", () => {
     expect(draft.catalyst.classification).toBe("no_confirmed_catalyst");
     expect(draft.body).toContain("There is no clean confirmed catalyst");
     expect(draft.body).toMatch(/Market commentary only\.$/);
+  });
+
+  it("debug Gemini probe makes a small configured test call", async () => {
+    const result = await debugGeminiFromEnv(
+      {
+        GEMINI_API_KEY: "test-gemini-key",
+        GEMINI_MODEL_PRIMARY: "gemini-2.5-flash"
+      } as NodeJS.ProcessEnv,
+      {
+        models: {
+          async generateContent(input) {
+            expect(input.contents).toBe("Reply with exactly: ok");
+            return { text: "ok" };
+          }
+        }
+      }
+    );
+
+    expect(result).toMatchObject({
+      configured: true,
+      provider: "gemini",
+      model: "gemini-2.5-flash",
+      apiKeyPresent: true,
+      callAttempted: true,
+      success: true,
+      responseText: "ok",
+      fallbackWouldBeUsed: false
+    });
   });
 });
 

@@ -5,7 +5,8 @@ import {
   AnalysisPipeline,
   CatalystClassifier,
   ConfidenceEngine,
-  createAnalystWriterFromEnv
+  createAnalystWriterFromEnv,
+  debugGeminiFromEnv
 } from "@market-desk/analysis-engine";
 import { ComplianceEngine } from "@market-desk/compliance";
 import { MarketSnapshotService, SnapshotNotFoundError } from "@market-desk/core";
@@ -122,6 +123,14 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     }
   }));
 
+  app.get("/debug/ai/gemini", { preHandler: requireRole(["viewer", "analyst", "admin"]) }, async () => {
+    const result = await debugGeminiFromEnv(process.env);
+    return {
+      ...result,
+      errorMessage: result.errorMessage ? sanitizeDebugMessage(result.errorMessage) : null
+    };
+  });
+
   app.get("/debug/provider/:asset", { preHandler: requireRole(["viewer", "analyst", "admin"]) }, async (request) => {
     const params = z.object({ asset: z.string().min(1) }).parse(request.params);
     const query = z.object({ refresh: z.coerce.boolean().optional() }).parse(request.query);
@@ -153,7 +162,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
       assetType !== "index" &&
       aiStatus.provider.toLowerCase() === "gemini" &&
       Boolean(aiStatus.geminiConfigured ?? aiStatus.configured);
-    const geminiDailyLimitReached = aiStatus.todayAiCalls >= aiStatus.maxGenerationsPerDay;
+    const geminiDailyLimitReached = aiStatus.todayAttemptedAiCalls >= aiStatus.maxGenerationsPerDay;
     const geminiWouldBeCalled = geminiEligible && !geminiDailyLimitReached && Boolean(snapshot);
     const contextCounts = contextCheckCounts(snapshot, assetType);
 

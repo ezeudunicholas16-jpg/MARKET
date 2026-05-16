@@ -1,6 +1,12 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { AnalysisPipeline, AiUsageTracker, GeminiAnalystWriter, GeminiGenerateClient } from "@market-desk/analysis-engine";
+import { ComplianceEngine } from "@market-desk/compliance";
+import { MarketSnapshotService } from "@market-desk/core";
+import { createMockProviderBundle } from "@market-desk/data-providers";
+import { TelegramClient } from "@market-desk/telegram";
 import { createServices } from "../src/app";
 import { handleTelegramCommand } from "../src/commands";
+import { PublishingDraftStore, PublishingService } from "../src/publishing";
 
 const originalEnv = { ...process.env };
 
@@ -80,8 +86,61 @@ describe("Telegram command behavior", () => {
     );
 
     expect(result.text).toContain("Last AI provider used: gemini");
+    expect(result.text).toContain("Last AI provider attempted: none");
     expect(result.text).toContain("Last AI fallback reason: missing Gemini API key");
     expect(result.text).toContain("Gemini configured: false");
+  });
+
+  it("/status exposes sanitized last Gemini error", async () => {
+    const providers = createMockProviderBundle();
+    const compliance = new ComplianceEngine();
+    const telegram = new TelegramClient(undefined, undefined);
+    const pipeline = new AnalysisPipeline(
+      new MarketSnapshotService(providers),
+      undefined,
+      undefined,
+      new GeminiAnalystWriter({
+        client: failingGeminiClient("Gemini failed with key=test-secret"),
+        tracker: new AiUsageTracker()
+      }),
+      compliance
+    );
+    const draftStore = new PublishingDraftStore();
+    const publishing = new PublishingService({
+      pipeline,
+      telegram,
+      store: draftStore,
+      publishingMode: "approval_required"
+    });
+
+    await handleTelegramCommand(
+      { command: "/why", args: ["NVDA"], rawArgs: "NVDA" },
+      {
+        pipeline,
+        marketData: providers.marketData,
+        compliance,
+        telegram,
+        publishing,
+        providerHealth: providers.health
+      }
+    );
+    const result = await handleTelegramCommand(
+      { command: "/status", args: [], rawArgs: "" },
+      {
+        pipeline,
+        marketData: providers.marketData,
+        compliance,
+        telegram,
+        publishing,
+        providerHealth: providers.health
+      }
+    );
+
+    expect(result.text).toContain("Last AI call attempted: true");
+    expect(result.text).toContain("Last Gemini success: false");
+    expect(result.text).toContain("Last Gemini error: Gemini failed with key=[redacted]");
+    expect(result.text).toContain("Last AI fallback reason: Gemini failed with key=[redacted]");
+    expect(result.text).not.toContain("test-secret");
   });
 
   it("/status groups provider errors and sanitizes provider messages", async () => {
@@ -122,3 +181,13 @@ describe("Telegram command behavior", () => {
     expect(result.text).not.toContain("secret-key");
   });
 });
+
+function failingGeminiClient(message: string): GeminiGenerateClient {
+  return {
+    models: {
+      async generateContent() {
+        throw new Error(message);
+      }
+    }
+  };
+}

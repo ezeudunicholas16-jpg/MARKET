@@ -439,11 +439,15 @@ export interface AiProviderStatus {
   fallbackProvider: string;
   configured: boolean;
   todayAiCalls: number;
+  todayAttemptedAiCalls: number;
+  todaySuccessfulAiCalls: number;
   todayFallbackCount: number;
   maxGenerationsPerDay: number;
   recentUsage: AiUsageRecord[];
   lastProviderUsed?: string;
+  lastProviderAttempted?: string;
   lastCallAttempted?: boolean;
+  lastGeminiSuccess?: boolean;
   lastFallbackReason?: string;
   lastGeminiError?: string;
   geminiConfigured?: boolean;
@@ -498,10 +502,13 @@ export class OpenAIAnalystWriter implements AnalystWriter {
       fallbackProvider: "template",
       configured: true,
       todayAiCalls: 0,
+      todayAttemptedAiCalls: 0,
+      todaySuccessfulAiCalls: 0,
       todayFallbackCount: 0,
       maxGenerationsPerDay: Number.POSITIVE_INFINITY,
       recentUsage: [],
       lastProviderUsed: "openai",
+      lastProviderAttempted: "none",
       lastCallAttempted: false
     };
   }
@@ -568,11 +575,15 @@ export class MockAnalystWriter implements AnalystWriter {
       fallbackProvider: "template",
       configured: true,
       todayAiCalls: 0,
+      todayAttemptedAiCalls: 0,
+      todaySuccessfulAiCalls: 0,
       todayFallbackCount: 0,
       maxGenerationsPerDay: Number.POSITIVE_INFINITY,
       recentUsage: [],
       lastProviderUsed: "template",
+      lastProviderAttempted: "none",
       lastCallAttempted: false,
+      lastGeminiSuccess: false,
       lastFallbackReason: "template writer selected"
     };
   }
@@ -859,17 +870,23 @@ export class GeminiAnalystWriter implements AnalystWriter {
     const last = recentUsage.at(-1);
     const lastFallback = [...recentUsage].reverse().find((record) => record.fallbackUsed);
     const lastGeminiError = [...recentUsage].reverse().find((record) => !record.success && record.callAttempted);
+    const todayAttemptedAiCalls = today.filter((record) => record.callAttempted).length;
+    const todaySuccessfulAiCalls = today.filter((record) => record.success && !record.fallbackUsed).length;
     return {
       provider: "Gemini",
       model: this.model,
       fallbackProvider: this.fallbackProvider,
       configured: Boolean(this.client),
-      todayAiCalls: today.filter((record) => !record.fallbackUsed).length,
+      todayAiCalls: todaySuccessfulAiCalls,
+      todayAttemptedAiCalls,
+      todaySuccessfulAiCalls,
       todayFallbackCount: today.filter((record) => record.fallbackUsed).length,
       maxGenerationsPerDay: this.maxGenerationsPerDay,
       recentUsage,
       lastProviderUsed: last?.providerName ?? this.providerName,
+      lastProviderAttempted: last?.callAttempted ? last.providerName : "none",
       lastCallAttempted: last?.callAttempted ?? false,
+      lastGeminiSuccess: last?.callAttempted ? last.success && !last.fallbackUsed : false,
       lastFallbackReason: lastFallback?.fallbackReason,
       lastGeminiError: lastGeminiError?.error,
       geminiConfigured: Boolean(this.client)
@@ -889,7 +906,7 @@ export class GeminiAnalystWriter implements AnalystWriter {
       return this.writeWithFallback(input, "missing Gemini API key", promptTokenEstimate);
     }
 
-    if (this.getStatus().todayAiCalls >= this.maxGenerationsPerDay) {
+    if (this.getStatus().todayAttemptedAiCalls >= this.maxGenerationsPerDay) {
       return this.writeWithFallback(input, "daily Gemini generation limit reached", promptTokenEstimate);
     }
 
@@ -1118,10 +1135,13 @@ export class AnalysisPipeline {
       fallbackProvider: "template",
       configured: false,
       todayAiCalls: 0,
+      todayAttemptedAiCalls: 0,
+      todaySuccessfulAiCalls: 0,
       todayFallbackCount: 0,
       maxGenerationsPerDay: Number.POSITIVE_INFINITY,
       recentUsage: [],
       lastProviderUsed: "unknown",
+      lastProviderAttempted: "none",
       lastCallAttempted: false
     };
   }
@@ -1184,6 +1204,85 @@ export function createAnalystWriterFromEnv(env: NodeJS.ProcessEnv = process.env)
   }
 
   return new MockAnalystWriter();
+}
+
+export interface GeminiDebugProbeResult {
+  configured: boolean;
+  provider: "gemini";
+  model: string;
+  apiKeyPresent: boolean;
+  callAttempted: boolean;
+  success: boolean;
+  responseText: string | null;
+  errorName: string | null;
+  errorMessage: string | null;
+  fallbackWouldBeUsed: boolean;
+}
+
+export async function debugGeminiFromEnv(
+  env: NodeJS.ProcessEnv = process.env,
+  client?: GeminiGenerateClient
+): Promise<GeminiDebugProbeResult> {
+  const model = env.GEMINI_MODEL_PRIMARY ?? "gemini-2.5-flash";
+  const apiKey = env.GEMINI_API_KEY;
+  const apiKeyPresent = Boolean(apiKey);
+  const configured = apiKeyPresent;
+
+  if (!configured) {
+    return {
+      configured,
+      provider: "gemini",
+      model,
+      apiKeyPresent,
+      callAttempted: false,
+      success: false,
+      responseText: null,
+      errorName: "ProviderConfigError",
+      errorMessage: "Gemini API key is not configured.",
+      fallbackWouldBeUsed: true
+    };
+  }
+
+  try {
+    const gemini = client ?? new GoogleGenAI({ apiKey: apiKey as string });
+    const response = await gemini.models.generateContent({
+      model,
+      contents: "Reply with exactly: ok",
+      config: {
+        systemInstruction: "Diagnostic probe. Reply exactly as requested.",
+        responseMimeType: "text/plain",
+        maxOutputTokens: 10,
+        temperature: 0
+      }
+    });
+    const responseText = response.text?.trim() ?? "";
+    const success = responseText === "ok";
+    return {
+      configured,
+      provider: "gemini",
+      model,
+      apiKeyPresent,
+      callAttempted: true,
+      success,
+      responseText: success ? "ok" : sanitizeAiMessage(responseText),
+      errorName: success ? null : "UnexpectedGeminiResponse",
+      errorMessage: success ? null : "Gemini did not return the expected diagnostic response.",
+      fallbackWouldBeUsed: !success
+    };
+  } catch (error) {
+    return {
+      configured,
+      provider: "gemini",
+      model,
+      apiKeyPresent,
+      callAttempted: true,
+      success: false,
+      responseText: null,
+      errorName: error instanceof Error ? error.name || "GeminiError" : "GeminiError",
+      errorMessage: errorMessage(error),
+      fallbackWouldBeUsed: true
+    };
+  }
 }
 
 function sameDirection(a: number, b: number): boolean {
