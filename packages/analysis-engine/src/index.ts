@@ -333,13 +333,13 @@ export class CatalystClassifier {
     return this.candidate({
       classification: "no_confirmed_catalyst",
       label,
-      explanation: "There is no clean confirmed catalyst from available live sources at the time of writing.",
+      explanation: "There is no confirmed catalyst in the current source set.",
       confidenceScore: 35,
       evidence: [
         {
           sourceId: evidenceSourceId,
           kind: "market_data",
-          summary: "There is no clean confirmed catalyst from available live sources at the time of writing.",
+          summary: "There is no confirmed catalyst in the current source set.",
           weight: 0.25
         }
       ]
@@ -432,6 +432,7 @@ export interface AiUsageRecord {
   jsonParseRecovered?: boolean;
   responseMode?: "text" | "json";
   qualityCheckResult?: PublicOutputQualityResult;
+  originalGeminiQualityPassed?: boolean;
   qualityRewriteAttempted?: boolean;
   qualityRewritePassed?: boolean;
   finalWriterUsed?: "gemini" | "template";
@@ -459,6 +460,7 @@ export interface AiProviderStatus {
   lastGeminiJsonParseRecovered?: boolean;
   lastGeminiResponseMode?: "text" | "json";
   lastQualityCheckResult?: PublicOutputQualityResult;
+  lastOriginalGeminiQualityPassed?: boolean;
   lastQualityCheckPassed?: boolean;
   lastQualityRewriteAttempted?: boolean;
   lastQualityRewritePassed?: boolean;
@@ -541,6 +543,7 @@ export class OpenAIAnalystWriter implements AnalystWriter {
       lastGeminiJsonParseRecovered: false,
       lastGeminiResponseMode: "text",
       lastQualityCheckResult: undefined,
+      lastOriginalGeminiQualityPassed: undefined,
       lastQualityCheckPassed: undefined,
       lastQualityRewriteAttempted: false,
       lastQualityRewritePassed: false,
@@ -623,6 +626,7 @@ export class MockAnalystWriter implements AnalystWriter {
       lastGeminiJsonParseRecovered: false,
       lastGeminiResponseMode: "text",
       lastQualityCheckResult: undefined,
+      lastOriginalGeminiQualityPassed: undefined,
       lastQualityCheckPassed: undefined,
       lastQualityRewriteAttempted: false,
       lastQualityRewritePassed: false,
@@ -802,13 +806,16 @@ export class MockAnalystWriter implements AnalystWriter {
     if (snapshot.assetClass === "equity") {
       const context =
         snapshot.sector && snapshot.sector !== "Unknown"
-          ? `${snapshot.sector} context is ${formatMove(snapshot.sectorMove)} and the index read is ${formatMove(snapshot.indexMove)}`
-          : `the index read is ${formatMove(snapshot.indexMove)}`;
+          ? `The wider market context matters here: ${snapshot.sector} is ${formatMove(snapshot.sectorMove)} and the relevant index is ${formatMove(snapshot.indexMove)}.`
+          : `The wider market context matters here, with the relevant index ${formatMove(snapshot.indexMove)}.`;
+      const volumeText =
+        "volume" in snapshot && typeof snapshot.volume === "number" && snapshot.volume > 0
+          ? ` on volume of ${snapshot.volume.toLocaleString()}`
+          : "";
       return [
-        `${input.subject} is ${promptFormatMove(snapshot.percentChange)}. There is no clean confirmed catalyst from available live sources at the time of writing.`,
-        `With no confirmed company-specific catalyst from the current source set, the cleaner read is that the move is being shaped by broader tape pressure, positioning, or sector participation rather than a standalone company event.`,
-        `${context}, so the equity move should be framed against broader tape participation rather than treated as a standalone confirmed story.`,
-        `For a stronger read, the desk would need a credible headline, filing, earnings update, analyst action, or clearer sector follow-through.`
+        `${input.subject} is ${promptFormatMove(snapshot.percentChange)}${volumeText}.`,
+        `There is no confirmed company-specific catalyst in the current source set, so the cleaner read is that the move is being shaped by broader tape pressure, positioning, or sector participation rather than a standalone ${input.subject} event. ${context}`,
+        `The next check is whether the move is confirmed by Nasdaq direction, sector breadth, fresh company commentary, filings, earnings detail, or company-specific news.`
       ].join("\n\n");
     }
 
@@ -816,12 +823,12 @@ export class MockAnalystWriter implements AnalystWriter {
       const isGold = /^(GOLD|XAUUSD|XAU\/USD)$/i.test(input.subject);
       const moveLine =
         isGold && Math.abs(snapshot.percentChange) <= 0.1
-          ? `${input.subject} is little changed rather than directionally weak. There is no clean confirmed catalyst from available live sources at the time of writing.`
-          : `${input.subject} is ${promptFormatMove(snapshot.percentChange)}. There is no clean confirmed catalyst from available live sources at the time of writing.`;
+          ? `${input.subject} is little changed, with price action looking muted rather than directionally weak.`
+          : `${input.subject} is ${promptFormatMove(snapshot.percentChange)}.`;
       if (isGold) {
         return [
           moveLine,
-          `The move looks more like consolidation while the market still needs clearer direction from the dollar, Treasury yields, Fed expectations, inflation data, or safe-haven demand.`,
+          `There is no confirmed macro or safe-haven catalyst in the current source set. The move looks more like consolidation while the market still needs clearer direction from DXY, Treasury yields, Fed expectations, inflation data, real yields if available, or safe-haven demand.`,
           `The next clean read comes from whether DXY and yields break directionally after incoming US macro data.`
         ].join("\n\n");
       }
@@ -834,15 +841,15 @@ export class MockAnalystWriter implements AnalystWriter {
 
     if (snapshot.assetClass === "forex") {
       return [
-        `${input.subject} is ${promptFormatMove(snapshot.percentChange)}. There is no clean confirmed catalyst from available live sources at the time of writing.`,
+        `${input.subject} is ${promptFormatMove(snapshot.percentChange)}.`,
         `The FX read should stay anchored to dollar momentum, rates, yields, central-bank expectations, and scheduled macro data. ${this.cleanPublicEvidence(snapshot.dxyContext.value)}; ${this.cleanPublicEvidence(snapshot.yieldContext.value)}.`,
         `Without a confirmed macro release or central-bank headline, the pair should be described as moving on available price action rather than a clean fundamental catalyst.`,
-      `The next clean read comes from a data print, policy comment, or clearer DXY/yield confirmation.`
+        `The next clean read comes from a data print, policy comment, or clearer DXY/yield confirmation.`
       ].join("\n\n");
     }
 
     return [
-      `${input.subject} is ${promptFormatMove(promptSnapshotMove(input.snapshot))}. There is no clean confirmed catalyst from available live sources at the time of writing.`,
+      `${input.subject} is ${promptFormatMove(promptSnapshotMove(input.snapshot))}.`,
       `The available source checks do not support a clean company-specific, macro-driven, earnings-related, or supply-demand explanation yet.`,
       `The cleaner read needs a filing, official release, credible news item, or clearer macro alignment before assigning a stronger explanation.`
     ].join("\n\n");
@@ -896,6 +903,16 @@ export interface GeminiAnalystWriterOptions {
   maxGenerationsPerDay?: number;
 }
 
+interface GeneratedDraftResult {
+  draft: AnalysisDraft;
+  promptTokenEstimate: number;
+  outputTokenEstimate: number;
+  rawResponseUsable: boolean;
+  jsonParseRecovered: boolean;
+  responseMode: "text" | "json";
+  qualityCheckResult: PublicOutputQualityResult;
+}
+
 export class GeminiAnalystWriter implements AnalystWriter {
   private readonly providerName = "gemini";
   private readonly model: string;
@@ -944,6 +961,7 @@ export class GeminiAnalystWriter implements AnalystWriter {
       lastGeminiJsonParseRecovered: last?.jsonParseRecovered ?? false,
       lastGeminiResponseMode: last?.responseMode ?? "text",
       lastQualityCheckResult: last?.qualityCheckResult,
+      lastOriginalGeminiQualityPassed: last?.originalGeminiQualityPassed,
       lastQualityCheckPassed: last?.qualityCheckResult?.ok,
       lastQualityRewriteAttempted: last?.qualityRewriteAttempted ?? false,
       lastQualityRewritePassed: last?.qualityRewritePassed ?? false,
@@ -958,6 +976,7 @@ export class GeminiAnalystWriter implements AnalystWriter {
     const promptTokenEstimate = estimateTokens(JSON.stringify(buildGeminiFacts(input)));
     let qualityRewriteAttempted = false;
     let qualityRewritePassed = false;
+    let originalQuality: PublicOutputQualityResult | undefined;
     this.logRoute({
       selectedProvider: this.providerName,
       geminiConfigured: Boolean(this.client),
@@ -974,64 +993,72 @@ export class GeminiAnalystWriter implements AnalystWriter {
     }
 
     try {
-      let initial = await this.generateDraft(input);
-      const initialQuality = evaluatePublicOutputQuality(initial.body, input.mode);
-      if (!initialQuality.ok) {
+      const initial = await this.generateDraft(input);
+      originalQuality = initial.qualityCheckResult;
+      let selected = initial;
+
+      if (!originalQuality.ok) {
         qualityRewriteAttempted = true;
-        const rewrittenForQuality = await this.tryQualityRewrite(input, initial, initialQuality);
+        const rewrittenForQuality = await this.tryQualityRewrite(input, initial.draft, originalQuality);
         if (!rewrittenForQuality) {
-          throw new Error(`Gemini output was too shallow: ${initialQuality.reasons.join(", ")}`);
+          throw new Error(`Gemini output was too shallow: ${originalQuality.reasons.join(", ")}`);
         }
-        const rewrittenQuality = evaluatePublicOutputQuality(rewrittenForQuality.body, input.mode);
+        const rewrittenQuality = rewrittenForQuality.qualityCheckResult;
         if (!rewrittenQuality.ok) {
           throw new Error(`Gemini rewrite was too shallow: ${rewrittenQuality.reasons.join(", ")}`);
         }
         qualityRewritePassed = true;
-        initial = rewrittenForQuality;
+        selected = rewrittenForQuality;
       }
 
-      const compliance = new ComplianceEngine().review(initial.body, {
+      const compliance = new ComplianceEngine().review(selected.draft.body, {
         confidenceScore: input.confidence.score,
-        sourceCount: initial.sourcesUsed.length,
+        sourceCount: selected.draft.sourcesUsed.length,
         publicOutput: isPublicMode(input.mode)
       });
-      const style = validateAnalystStyle(initial.body, {
+      const style = validateAnalystStyle(selected.draft.body, {
         mode: input.mode,
-        sourceIds: initial.sourcesUsed,
-        evidenceSummaries: initial.catalyst.evidence.map((item) => item.summary)
+        sourceIds: selected.draft.sourcesUsed,
+        evidenceSummaries: selected.draft.catalyst.evidence.map((item) => item.summary)
       });
 
       const outputComplianceFlags = compliance.flags.filter((flag) => !["low_confidence", "weak_sourcing"].includes(flag.code));
-      if (outputComplianceFlags.length === 0 && style.ok) {
-        return initial;
+      if (outputComplianceFlags.length > 0 || !style.ok) {
+        const rewritten = await this.tryRewrite(input, selected.draft, { ...compliance, flags: outputComplianceFlags });
+        if (rewritten) {
+          const rewrittenCompliance = new ComplianceEngine().review(rewritten.draft.body, {
+            confidenceScore: input.confidence.score,
+            sourceCount: rewritten.draft.sourcesUsed.length,
+            publicOutput: isPublicMode(input.mode)
+          });
+          const rewrittenStyle = validateAnalystStyle(rewritten.draft.body, {
+            mode: input.mode,
+            sourceIds: rewritten.draft.sourcesUsed,
+            evidenceSummaries: rewritten.draft.catalyst.evidence.map((item) => item.summary)
+          });
+          const rewrittenOutputFlags = rewrittenCompliance.flags.filter((flag) => !["low_confidence", "weak_sourcing"].includes(flag.code));
+          if (rewrittenOutputFlags.length === 0 && rewrittenStyle.ok && rewritten.qualityCheckResult.ok) {
+            selected = rewritten;
+          }
+        }
       }
 
-      const rewritten = await this.tryRewrite(input, initial, { ...compliance, flags: outputComplianceFlags });
-      if (!rewritten) {
-        return initial;
-      }
-
-      const rewrittenCompliance = new ComplianceEngine().review(rewritten.body, {
-        confidenceScore: input.confidence.score,
-        sourceCount: rewritten.sourcesUsed.length,
-        publicOutput: isPublicMode(input.mode)
+      this.recordGeminiSuccess(selected, {
+        originalQualityPassed: originalQuality.ok,
+        qualityRewriteAttempted,
+        qualityRewritePassed
       });
-      const rewrittenStyle = validateAnalystStyle(rewritten.body, {
-        mode: input.mode,
-        sourceIds: rewritten.sourcesUsed,
-        evidenceSummaries: rewritten.catalyst.evidence.map((item) => item.summary)
-      });
-
-      return rewrittenCompliance.flags.length === 0 && rewrittenStyle.ok ? rewritten : initial;
+      return selected.draft;
     } catch (error) {
       return this.writeWithFallback(input, errorMessage(error), promptTokenEstimate, {
+        originalQualityPassed: originalQuality?.ok,
         attempted: qualityRewriteAttempted,
         passed: qualityRewritePassed
       });
     }
   }
 
-  private async generateDraft(input: AnalystWritingInput, rewriteBody?: string, flags: string[] = []): Promise<AnalysisDraft> {
+  private async generateDraft(input: AnalystWritingInput, rewriteBody?: string, flags: string[] = []): Promise<GeneratedDraftResult> {
     const top = input.catalysts[0];
     if (!top) {
       throw new Error("Cannot write analysis without a catalyst candidate.");
@@ -1117,48 +1144,30 @@ export class GeminiAnalystWriter implements AnalystWriter {
       evidenceSummaries: [...promptInput.evidence.map((item) => item.summary), ...promptInput.facts]
     });
     const qualityCheckResult = evaluatePublicOutputQuality(body, input.mode);
-    const qualityRewriteAttempted = flags.includes("too_shallow");
-    this.tracker.record({
-      providerName: this.providerName,
-      model: this.model,
+
+    return {
+      draft: analysisDraftSchema.parse({
+        mode: input.mode,
+        title: parsed.title,
+        body,
+        confidence: input.confidence,
+        catalyst: top,
+        sourcesUsed: parsed.sourcesUsed
+      }),
       promptTokenEstimate,
       outputTokenEstimate: estimateTokens(body),
-      success: true,
-      fallbackUsed: false,
-      callAttempted: true,
       rawResponseUsable: normalized.rawResponseUsable,
       jsonParseRecovered: normalized.jsonParseRecovered,
       responseMode: normalized.responseMode,
-      qualityCheckResult,
-      qualityRewriteAttempted,
-      qualityRewritePassed: qualityRewriteAttempted ? qualityCheckResult.ok : false,
-      finalWriterUsed: "gemini"
-    });
-    this.logRoute({
-      selectedProvider: this.providerName,
-      geminiConfigured: Boolean(this.client),
-      callAttempted: true,
-      success: true,
-      fallbackUsed: false,
-      jsonParseRecovered: normalized.jsonParseRecovered,
-      responseMode: normalized.responseMode
-    });
-
-    return analysisDraftSchema.parse({
-      mode: input.mode,
-      title: parsed.title,
-      body,
-      confidence: input.confidence,
-      catalyst: top,
-      sourcesUsed: parsed.sourcesUsed
-    });
+      qualityCheckResult
+    };
   }
 
   private async tryRewrite(
     input: AnalystWritingInput,
     draft: AnalysisDraft,
     compliance: ComplianceResult
-  ): Promise<AnalysisDraft | null> {
+  ): Promise<GeneratedDraftResult | null> {
     try {
       return await this.generateDraft(
         input,
@@ -1174,7 +1183,7 @@ export class GeminiAnalystWriter implements AnalystWriter {
     input: AnalystWritingInput,
     draft: AnalysisDraft,
     quality: PublicOutputQualityResult
-  ): Promise<AnalysisDraft | null> {
+  ): Promise<GeneratedDraftResult | null> {
     try {
       return await this.generateDraft(input, draft.body, [
         "too_shallow",
@@ -1185,11 +1194,51 @@ export class GeminiAnalystWriter implements AnalystWriter {
     }
   }
 
+  private recordGeminiSuccess(
+    result: GeneratedDraftResult,
+    quality: {
+      originalQualityPassed: boolean;
+      qualityRewriteAttempted: boolean;
+      qualityRewritePassed: boolean;
+    }
+  ): void {
+    this.tracker.record({
+      providerName: this.providerName,
+      model: this.model,
+      promptTokenEstimate: result.promptTokenEstimate,
+      outputTokenEstimate: result.outputTokenEstimate,
+      success: true,
+      fallbackUsed: false,
+      callAttempted: true,
+      rawResponseUsable: result.rawResponseUsable,
+      jsonParseRecovered: result.jsonParseRecovered,
+      responseMode: result.responseMode,
+      qualityCheckResult: result.qualityCheckResult,
+      originalGeminiQualityPassed: quality.originalQualityPassed,
+      qualityRewriteAttempted: quality.qualityRewriteAttempted,
+      qualityRewritePassed: quality.qualityRewritePassed,
+      finalWriterUsed: "gemini"
+    });
+    this.logRoute({
+      selectedProvider: this.providerName,
+      geminiConfigured: Boolean(this.client),
+      callAttempted: true,
+      success: true,
+      fallbackUsed: false,
+      jsonParseRecovered: result.jsonParseRecovered,
+      responseMode: result.responseMode
+    });
+  }
+
   private async writeWithFallback(
     input: AnalystWritingInput,
     reason: string,
     promptTokenEstimate: number,
-    qualityRewrite: { attempted: boolean; passed: boolean } = { attempted: false, passed: false }
+    qualityRewrite: { originalQualityPassed?: boolean; attempted: boolean; passed: boolean } = {
+      originalQualityPassed: undefined,
+      attempted: false,
+      passed: false
+    }
   ): Promise<AnalysisDraft> {
     const draft = await this.fallback.write(input);
     this.tracker.record({
@@ -1204,6 +1253,7 @@ export class GeminiAnalystWriter implements AnalystWriter {
       jsonParseRecovered: false,
       responseMode: "text",
       qualityCheckResult: evaluatePublicOutputQuality(draft.body, input.mode),
+      originalGeminiQualityPassed: qualityRewrite.originalQualityPassed,
       qualityRewriteAttempted: qualityRewrite.attempted,
       qualityRewritePassed: qualityRewrite.passed,
       finalWriterUsed: "template",
@@ -1293,6 +1343,7 @@ export class AnalysisPipeline {
       lastGeminiJsonParseRecovered: false,
       lastGeminiResponseMode: "text",
       lastQualityCheckResult: undefined,
+      lastOriginalGeminiQualityPassed: undefined,
       lastQualityCheckPassed: undefined,
       lastQualityRewriteAttempted: false,
       lastQualityRewritePassed: false,
@@ -1517,7 +1568,7 @@ export function evaluatePublicOutputQuality(text: string, mode: AnalysisMode): P
   const hasInterpretation =
     /\b(cleaner read|appears|looks|suggests|reflects|linked to|shaped by|pressure|participation|positioning|broader tape|sector|index|macro|company-specific|not confirmed|confirmed catalyst|current source set does not show|market is pricing|consolidat|rate-driven|dollar|yield|safe-haven|standalone)\b/i.test(text);
   const hasWhatMattersNext =
-    /\b(what matters next|the next (test|catalyst|check|clean read|useful evidence|read|focus)|the key check|key check is|the market now needs|a clearer shift in|next clean read comes from|next conditions?|watch|depends on|would need|will be whether|matters because|follow-through|earnings|filings|news|sector breadth|index direction|nasdaq direction|semiconductor breadth|dxy|yields|fed|inflation|inventories|opec|supply risk|incoming .*data|fresh .*commentary|company-specific news)\b/i.test(text);
+    /\b(what matters next|the next (test|catalyst|check|clean read|useful evidence|read|focus)|the key (check|variable)|key check is|key variable is|the market (now needs|will be watching)|a stronger explanation would require|a clearer shift in|next clean read comes from|next conditions?|watch|depends on|would need|will be whether|matters because|follow-through|earnings|filings|news|sector breadth|index direction|nasdaq direction|semiconductor breadth|dxy|yields|fed|inflation|inventories|opec|supply risk|incoming .*data|fresh .*commentary|company-specific news)\b/i.test(text);
   const endsWithFooter = /Market commentary only\.\s*$/i.test(text);
   const hasBannedTradingAdvice =
     /\b(buy|sell|long this|short this|entry|signal|pump|moon|guaranteed|risk-free|easy money|must buy|load up|this will definitely|financial advice)\b/i.test(text);

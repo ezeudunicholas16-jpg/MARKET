@@ -28,6 +28,8 @@ const publicStyleRules = [
   "Public commentary should normally be three short paragraphs: move, interpretation, and what matters next.",
   "Target 85-140 words for public commentary, with a hard minimum of 55 words and a hard maximum of 180 words.",
   "Do not stop at a quote recap. Always explain the likely market read using available evidence and clearly say when a company-specific or macro catalyst is not confirmed.",
+  "Avoid stiff phrases such as 'the index read is', 'available live sources at the time of writing', 'the desk would need', and 'standalone confirmed story'.",
+  "Prefer natural desk language: 'The cleaner read is', 'The wider market context matters here', 'The next check is', and 'A stronger explanation would require'.",
   "Do not sound like a chatbot. Do not use generic filler or basic finance lessons.",
   "No trade recommendations, no buy/sell language, no entries, no signals, no price targets, no hype.",
   "Do not invent facts beyond the structured input.",

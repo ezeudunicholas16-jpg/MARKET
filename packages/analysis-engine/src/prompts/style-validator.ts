@@ -34,7 +34,14 @@ const genericPhraseRules: Array<[RegExp, string]> = [
   [/\bplays a crucial role\b/i, "Avoid generic explanatory filler."],
   [/\bnavigating (?:market )?volatility\b/i, "Avoid generic volatility boilerplate."],
   [/\bkey takeaway\b/i, "Avoid robotic headings and summaries in public copy."],
-  [/\boverall sentiment\b/i, "Avoid unsupported sentiment language."]
+  [/\boverall sentiment\b/i, "Avoid unsupported sentiment language."],
+  [/\bthe index read is\b/i, "Use natural market-context phrasing."],
+  [/\bthe useful read is\b/i, "Use natural analyst phrasing."],
+  [/\bthe right stance is caution\b/i, "Avoid advice-like canned phrasing."],
+  [/\bthe desk would need\b/i, "Use 'A stronger explanation would require' instead."],
+  [/\bavailable live sources at the time of writing\b/i, "Use current-source-set phrasing."],
+  [/\bsource set does not provide enough support\b/i, "Avoid mechanical source caveats."],
+  [/\bstandalone confirmed story\b/i, "Use cleaner company-specific catalyst phrasing."]
 ];
 
 const tradingLanguageRules: Array<[RegExp, string]> = [

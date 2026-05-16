@@ -80,12 +80,16 @@ describe("GeminiAnalystWriter", () => {
     });
 
     const draft = await writer.write(await inputForMode("no_confirmed_catalyst"));
+    const status = writer.getStatus();
 
     expect(calls).toBe(1);
     expect(draft.body).toContain("NVDA");
     expect(writer.getStatus().todayAttemptedAiCalls).toBe(1);
     expect(writer.getStatus().todayAiCalls).toBe(1);
     expect(writer.getStatus().todayFallbackCount).toBe(0);
+    expect(status.lastOriginalGeminiQualityPassed).toBe(true);
+    expect(status.lastQualityRewriteAttempted).toBe(false);
+    expect(status.lastFinalWriterUsed).toBe("gemini");
   });
 
   it("does not use template fallback when Gemini succeeds", async () => {
@@ -219,6 +223,58 @@ describe("GeminiAnalystWriter", () => {
     expect(status.lastFinalWriterUsed).toBe("gemini");
   });
 
+  it("does not attempt a quality rewrite when original Gemini output passes", async () => {
+    let calls = 0;
+    const writer = new GeminiAnalystWriter({
+      client: fakeGeminiClient([publicNvdaText(), "This response should not be requested."], undefined, () => {
+        calls += 1;
+      }),
+      tracker: new AiUsageTracker()
+    });
+
+    const draft = await writer.write(await inputForMode("public_telegram"));
+    const status = writer.getStatus();
+
+    expect(calls).toBe(1);
+    expect(draft.body).toContain("NVDA is firmer today");
+    expect(status.lastOriginalGeminiQualityPassed).toBe(true);
+    expect(status.lastQualityRewriteAttempted).toBe(false);
+    expect(status.lastQualityRewritePassed).toBe(false);
+    expect(status.lastFinalWriterUsed).toBe("gemini");
+    expect(status.lastFallbackReason).toBeUndefined();
+    expect(status.todayFallbackCount).toBe(0);
+  });
+
+  it("uses template fallback only when original and rewrite both fail quality", async () => {
+    let calls = 0;
+    const writer = new GeminiAnalystWriter({
+      client: fakeGeminiClient(
+        [
+          "NVDA declined 4.42%.\n\nMarket commentary only.",
+          "NVDA declined again.\n\nMarket commentary only."
+        ],
+        undefined,
+        () => {
+          calls += 1;
+        }
+      ),
+      tracker: new AiUsageTracker()
+    });
+
+    const draft = await writer.write(await inputForMode("public_telegram"));
+    const status = writer.getStatus();
+
+    expect(calls).toBe(2);
+    expect(draft.body).toContain("Market commentary only.");
+    expect(status.lastOriginalGeminiQualityPassed).toBe(false);
+    expect(status.lastQualityRewriteAttempted).toBe(true);
+    expect(status.lastQualityRewritePassed).toBe(false);
+    expect(status.lastFinalWriterUsed).toBe("template");
+    expect(status.lastGeminiSuccess).toBe(false);
+    expect(status.todayFallbackCount).toBe(1);
+    expect(status.lastFallbackReason).toMatch(/Gemini rewrite was too shallow|Gemini output was too shallow/);
+  });
+
   it("returns valid public Telegram output from structured Gemini JSON", async () => {
     const writer = new GeminiAnalystWriter({
       client: fakeGeminiClient([
@@ -259,9 +315,9 @@ describe("GeminiAnalystWriter", () => {
         {
           title: "No confirmed catalyst",
           body: [
-            "NVDA is firmer today. There is no clean confirmed catalyst from available live sources at the time of writing.",
-            "The current source set does not show a confirmed company-specific, macro, earnings, or sector driver, so the cleaner read is positioning and broader tape participation rather than a standalone event.",
-            "The next clean read comes from a filing, credible company news, earnings detail, or clearer sector confirmation."
+            "NVDA is firmer today, with live pricing showing a clear move in the stock.",
+            "There is no confirmed company-specific catalyst in the current source set, so the cleaner read is positioning and broader tape participation rather than a standalone event.",
+            "The next check is whether a filing, credible company news, earnings detail, or clearer sector confirmation improves the explanation."
           ].join("\n\n"),
           sourcesUsed: ["src-market-mock"]
         }
@@ -271,7 +327,7 @@ describe("GeminiAnalystWriter", () => {
     const draft = await writer.write(await inputForMode("no_confirmed_catalyst"));
 
     expect(draft.catalyst.classification).toBe("no_confirmed_catalyst");
-    expect(draft.body).toContain("There is no clean confirmed catalyst");
+    expect(draft.body).toContain("There is no confirmed company-specific catalyst");
     expect(draft.body).toMatch(/Market commentary only\.$/);
   });
 
@@ -291,6 +347,20 @@ describe("GeminiAnalystWriter", () => {
     expect(quality.wordCount).toBeLessThanOrEqual(180);
   });
 
+  it("accepts next-check language as a valid catalyst/watch factor", () => {
+    const text = [
+      "NVDA is lower today, with live pricing showing a 4.42% decline on heavy volume.",
+      "There is no confirmed company-specific catalyst in the current source set, so the cleaner read is that the move is being shaped by broader tape pressure, positioning, or semiconductor participation. The wider market context matters here because tech weakness can amplify single-name moves.",
+      "The next check is whether the weakness is confirmed by Nasdaq direction, semiconductor breadth, fresh AI-chip demand commentary, or company-specific news.",
+      "Market commentary only."
+    ].join("\n\n");
+
+    const quality = evaluatePublicOutputQuality(text, "equity_mover_reaction");
+
+    expect(quality.ok).toBe(true);
+    expect(quality.hasWhatMattersNext).toBe(true);
+  });
+
   it("uses little-changed language for tiny GOLD moves in template fallback", async () => {
     const writer = new GeminiAnalystWriter({ tracker: new AiUsageTracker() });
     const draft = await writer.write(await commodityInputForGoldMove(-0.05));
@@ -298,6 +368,17 @@ describe("GeminiAnalystWriter", () => {
     expect(draft.body).toContain("little changed");
     expect(draft.body).not.toMatch(/\bsofter\b|\bweaker\b/i);
     expect(draft.body).toMatch(/Market commentary only\.$/);
+  });
+
+  it("NVDA no-catalyst fallback avoids mechanical analyst phrases", async () => {
+    const writer = new GeminiAnalystWriter({ tracker: new AiUsageTracker() });
+    const draft = await writer.write(await inputForMode("no_confirmed_catalyst"));
+
+    expect(draft.body).toContain("There is no confirmed company-specific catalyst");
+    expect(draft.body).toContain("The next check is");
+    expect(draft.body).not.toMatch(
+      /the index read is|the useful read is|the right stance is caution|the desk would need|available live sources at the time of writing|source set does not provide enough support|standalone confirmed story/i
+    );
   });
 
   it("debug Gemini probe makes a small configured test call", async () => {
