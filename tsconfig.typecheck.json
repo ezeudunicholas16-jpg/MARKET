@@ -1,0 +1,19 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "baseUrl": ".",
+    "types": ["node"],
+    "paths": {
+      "@market-desk/shared": ["packages/shared/src/index.ts"],
+      "@market-desk/data-providers": ["packages/data-providers/src/index.ts"],
+      "@market-desk/core": ["packages/core/src/index.ts"],
+      "@market-desk/analysis-engine": ["packages/analysis-engine/src/index.ts"],
+      "@market-desk/compliance": ["packages/compliance/src/index.ts"],
+      "@market-desk/telegram": ["packages/telegram/src/index.ts"],
+      "@market-desk/db": ["packages/db/src/index.ts"]
+    }
+  },
+  "include": ["packages/*/src/**/*.ts", "packages/*/test/**/*.ts", "apps/api/src/**/*.ts", "apps/api/test/**/*.ts"],
+  "exclude": ["node_modules", "dist", ".next"]
+}

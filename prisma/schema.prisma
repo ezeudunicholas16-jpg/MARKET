@@ -1,0 +1,189 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum AssetClass {
+  EQUITY
+  FOREX
+  COMMODITY
+  INDEX
+}
+
+model Asset {
+  id            String           @id @default(cuid())
+  symbol        String           @unique
+  name          String
+  assetClass    AssetClass
+  sector        String?
+  exchange      String?
+  baseCurrency  String?
+  quoteCurrency String?
+  isActive      Boolean          @default(true)
+  createdAt     DateTime         @default(now())
+  updatedAt     DateTime         @updatedAt
+  snapshots     MarketSnapshot[]
+  watchlist     WatchlistItem[]
+}
+
+model MarketSnapshot {
+  id            String     @id @default(cuid())
+  assetId       String?
+  asset         Asset?     @relation(fields: [assetId], references: [id])
+  symbol        String
+  assetClass    AssetClass
+  snapshotType  String
+  payload       Json
+  price         Float?
+  percentChange Float?
+  generatedAt   DateTime   @default(now())
+  catalysts     Catalyst[]
+  drafts        AnalysisDraft[]
+
+  @@index([symbol, generatedAt])
+}
+
+model Source {
+  id               String     @id @default(cuid())
+  provider         String
+  sourceType       String
+  title            String
+  url              String?
+  externalId       String?
+  publishedAt      DateTime?
+  retrievedAt      DateTime   @default(now())
+  credibilityScore Float?
+  evidence         Json?
+  newsItems        NewsItem[]
+
+  @@index([provider, sourceType])
+}
+
+model NewsItem {
+  id          String   @id @default(cuid())
+  sourceId    String?
+  source      Source?  @relation(fields: [sourceId], references: [id])
+  symbol      String?
+  headline    String
+  summary     String?
+  url         String?
+  sourceName  String
+  publishedAt DateTime
+  createdAt   DateTime @default(now())
+
+  @@index([symbol, publishedAt])
+}
+
+model Filing {
+  id           String   @id @default(cuid())
+  symbol       String
+  filingType   String
+  accessionNo  String?
+  title        String
+  sourceUrl    String?
+  filedAt      DateTime
+  retrievedAt  DateTime @default(now())
+
+  @@index([symbol, filedAt])
+}
+
+model Catalyst {
+  id              String          @id @default(cuid())
+  snapshotId      String?
+  snapshot        MarketSnapshot? @relation(fields: [snapshotId], references: [id])
+  classification  String
+  label           String
+  evidence        Json
+  confidenceScore Int
+  sourceIds       Json
+  explanation     String
+  createdAt       DateTime        @default(now())
+
+  @@index([classification, confidenceScore])
+}
+
+model AnalysisDraft {
+  id                 String              @id @default(cuid())
+  snapshotId         String?
+  snapshot           MarketSnapshot?     @relation(fields: [snapshotId], references: [id])
+  mode               String
+  title              String?
+  body               String
+  confidenceScore    Int
+  catalystLabel      String
+  sourcesUsed        Json
+  status             String              @default("draft")
+  createdAt          DateTime            @default(now())
+  complianceResult   ComplianceResult?
+  publishedPosts     PublishedPost[]
+
+  @@index([mode, createdAt])
+}
+
+model ComplianceResult {
+  id            String        @id @default(cuid())
+  draftId       String?       @unique
+  draft         AnalysisDraft? @relation(fields: [draftId], references: [id])
+  status        String
+  flags         Json
+  rewrittenText String?
+  createdAt     DateTime      @default(now())
+}
+
+model PublishedPost {
+  id                String        @id @default(cuid())
+  draftId           String?
+  draft             AnalysisDraft? @relation(fields: [draftId], references: [id])
+  channel           String
+  externalMessageId String?
+  body              String
+  publishedAt       DateTime      @default(now())
+
+  @@index([channel, publishedAt])
+}
+
+model ScheduledJob {
+  id        String    @id @default(cuid())
+  name      String    @unique
+  queueName String
+  jobName   String
+  cronUtc   String?
+  timezone  String    @default("Africa/Lagos")
+  enabled   Boolean   @default(true)
+  lastRunAt DateTime?
+  metadata  Json?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+}
+
+model WatchlistItem {
+  id         String     @id @default(cuid())
+  assetId    String?
+  asset      Asset?     @relation(fields: [assetId], references: [id])
+  symbol     String
+  assetClass AssetClass
+  reason     String?
+  priority   Int        @default(5)
+  isActive   Boolean    @default(true)
+  createdAt  DateTime   @default(now())
+  updatedAt  DateTime   @updatedAt
+
+  @@unique([symbol, assetClass])
+}
+
+model BotCommandLog {
+  id              String   @id @default(cuid())
+  command         String
+  args            Json
+  chatId          String?
+  userId          String?
+  status          String
+  responsePreview String?
+  createdAt       DateTime @default(now())
+
+  @@index([command, createdAt])
+}

@@ -1,0 +1,25 @@
+{
+  "name": "@market-desk/analysis-engine",
+  "version": "0.1.0",
+  "private": true,
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint \"src/**/*.ts\" \"test/**/*.ts\"",
+    "test": "vitest run --config ../../vitest.config.ts"
+  },
+  "dependencies": {
+    "@google/genai": "^2.3.0",
+    "@market-desk/compliance": "workspace:*",
+    "@market-desk/core": "workspace:*",
+    "@market-desk/shared": "workspace:*",
+    "openai": "^5.3.0",
+    "zod": "^3.25.51"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.3",
+    "vitest": "^3.2.2"
+  }
+}
