@@ -7,7 +7,7 @@ import { startScheduler, SchedulerHandle } from "./scheduler";
 async function main() {
   const app = await buildApp({ logger: createLoggerOptions() });
   const port = Number(process.env.PORT || 10000);
-  const host = "0.0.0.0";
+  const host = process.env.HOST || "0.0.0.0";
   let scheduler: SchedulerHandle | undefined;
 
   if (process.env.ENABLE_SCHEDULER === "true" && process.env.REDIS_URL) {
@@ -25,6 +25,8 @@ async function main() {
   process.on("SIGTERM", shutdown);
 
   await app.listen({ port, host });
+  app.log.info(`Server listening on host ${host} port ${port}`);
+  app.log.info(`Environment: ${process.env.NODE_ENV || "development"}`);
 }
 
 main().catch((error) => {
