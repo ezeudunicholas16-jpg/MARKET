@@ -2,7 +2,7 @@
 
 Production-grade scaffold for an automated market analyst engine. The system collects structured market facts first, classifies catalysts with deterministic rules, scores confidence, writes analyst commentary from structured evidence only, runs compliance review, and exposes the result through a Fastify API, Telegram command surface, BullMQ scheduler, and Next.js admin dashboard.
 
-This first implementation intentionally uses mock providers. Live data providers can be added behind the provider interfaces without changing the API, dashboard, Telegram commands, or analysis pipeline.
+The production quote path uses Twelve Data through a provider abstraction, with mock providers limited to development/test or explicit dry runs. Gemini is the recommended analyst writer; template writing is retained only as a fallback when the AI provider is unavailable.
 
 ## Stack
 
@@ -11,7 +11,7 @@ This first implementation intentionally uses mock providers. Live data providers
 - Next.js admin dashboard
 - PostgreSQL with Prisma ORM
 - Redis and BullMQ scheduler structure
-- OpenAI API writing interface with mock fallback
+- Gemini analyst writer with template fallback; OpenAI support remains available
 - Telegram Bot API integration
 - Zod validation
 - Vitest tests
@@ -39,12 +39,12 @@ market-desk-engine/
 ## Local Setup
 
 ```bash
-pnpm install
+npx pnpm@10.12.1 install
 cp .env.example .env
 docker compose up -d
-pnpm db:migrate
-pnpm db:seed
-pnpm dev
+npx pnpm@10.12.1 db:push
+npx pnpm@10.12.1 db:seed
+npx pnpm@10.12.1 dev
 ```
 
 If `pnpm` is not on your PATH, use `npx pnpm@10.12.1 <command>` or install pnpm globally with `npm install -g pnpm@10.12.1`.
@@ -55,14 +55,14 @@ Dashboard: `http://localhost:3000`
 ## Core Commands
 
 ```bash
-pnpm lint
-pnpm typecheck
-pnpm test
-pnpm build
-pnpm dev:telegram-test -- /why NVDA
-pnpm dev:telegram-test -- /forex EURUSD
-pnpm dev:telegram-test -- /commodity GOLD
-pnpm dev:telegram-test -- /riskcheck "This is a must buy"
+npx pnpm@10.12.1 lint
+npx pnpm@10.12.1 typecheck
+npx pnpm@10.12.1 test
+npx pnpm@10.12.1 build
+npx pnpm@10.12.1 dev:telegram-test -- /why NVDA
+npx pnpm@10.12.1 dev:telegram-test -- /forex EURUSD
+npx pnpm@10.12.1 dev:telegram-test -- /commodity GOLD
+npx pnpm@10.12.1 dev:telegram-test -- /riskcheck "buy this stock now"
 ```
 
 ## Production Runbook
@@ -70,12 +70,12 @@ pnpm dev:telegram-test -- /riskcheck "This is a must buy"
 ### 1. Local setup
 
 ```bash
-pnpm install
+npx pnpm@10.12.1 install
 cp .env.example .env
 docker compose up -d
-pnpm db:migrate
-pnpm db:seed
-pnpm dev
+npx pnpm@10.12.1 db:push
+npx pnpm@10.12.1 db:seed
+npx pnpm@10.12.1 dev
 ```
 
 API: `http://localhost:4000`  
@@ -132,19 +132,26 @@ The public channel receives only approved or auto-approved posts. The private ad
 Local development:
 
 ```bash
-pnpm db:migrate
-pnpm db:seed
+npx pnpm@10.12.1 db:push
+npx pnpm@10.12.1 db:seed
 ```
 
 Production:
 
 ```bash
-pnpm db:generate
-pnpm db:migrate:deploy
-pnpm db:seed:watchlist
+npx pnpm@10.12.1 db:generate
+npx pnpm@10.12.1 db:migrate:deploy
+npx pnpm@10.12.1 db:seed:watchlist
 ```
 
-`db:migrate:deploy` applies committed Prisma migrations without creating a new migration. Use `PRODUCTION_WATCHLIST` to seed a production-specific watchlist:
+For first production setup without committed migration files, use:
+
+```bash
+npx pnpm@10.12.1 exec prisma db push --schema prisma/schema.prisma
+npx pnpm@10.12.1 db:seed
+```
+
+`prisma db push` pushes the Prisma schema state to the database without migration files. After the schema exists, run the seed command. `db:migrate:deploy` remains available for committed Prisma migrations. Use `PRODUCTION_WATCHLIST` to seed a production-specific watchlist:
 
 ```bash
 PRODUCTION_WATCHLIST=AAPL,NVDA,TSLA,EURUSD,GOLD,OIL pnpm db:seed:watchlist
@@ -196,29 +203,29 @@ OPENAI_MODEL=gpt-4.1-mini
 
 ### 6. Market data provider setup
 
-Choose primary and backup providers per category:
+Twelve Data is the primary live provider for equities, forex, commodities, indices, and mover snapshots. Finnhub, FRED, and SEC are optional context providers:
 
 ```bash
-MARKET_DATA_PRIMARY_PROVIDER=fmp
-MARKET_DATA_BACKUP_PROVIDER=alpha_vantage
-NEWS_PRIMARY_PROVIDER=finnhub
-NEWS_BACKUP_PROVIDER=fmp
-MACRO_PRIMARY_PROVIDER=finnhub
-MACRO_BACKUP_PROVIDER=alpha_vantage
-FILINGS_PRIMARY_PROVIDER=sec
-EARNINGS_PRIMARY_PROVIDER=fmp
-EARNINGS_BACKUP_PROVIDER=finnhub
-SECTOR_PRIMARY_PROVIDER=fmp
+LIVE_DATA_ENABLED=true
+MARKET_DATA_PROVIDER=twelve_data
+FOREX_PROVIDER=twelve_data
+COMMODITY_PROVIDER=twelve_data
+INDEX_PROVIDER=twelve_data
+NEWS_PROVIDER=finnhub
+MACRO_PROVIDER=fred
+FILINGS_PROVIDER=sec
 ```
 
 Set the matching keys:
 
 ```bash
-FMP_API_KEY=
+TWELVE_DATA_API_KEY=
 FINNHUB_API_KEY=
-ALPHA_VANTAGE_API_KEY=
+FRED_API_KEY=
 SEC_USER_AGENT=MarketDeskEngine/0.1 ops@example.com
 ```
+
+If `NODE_ENV=production` and `LIVE_DATA_ENABLED=true`, the router does not silently fall back to mock data. Missing live-provider keys return clear provider configuration errors. Template fallback is only for writing, never for fake market data generation.
 
 Verify provider health:
 
@@ -259,6 +266,8 @@ docker compose -f docker-compose.prod.example.yml up -d --build
 Render:
 
 - Use `render.yaml.example` as the blueprint starting point.
+- Build command: `npx pnpm@10.12.1 install --frozen-lockfile && npx pnpm@10.12.1 build`
+- Start command: `npx pnpm@10.12.1 --filter @market-desk/api start`
 - Set all secrets in Render environment variables.
 - Keep `API_AUTH_REQUIRED=true`.
 
@@ -302,7 +311,7 @@ TELEGRAM_WEBHOOK_SECRET=
 Then run:
 
 ```bash
-pnpm telegram:webhook
+npx pnpm@10.12.1 telegram:webhook
 ```
 
 The script calls Telegram `setWebhook`, enables `message` and `callback_query` updates, and prints `getWebhookInfo`.
@@ -312,22 +321,23 @@ The script calls Telegram `setWebhook`, enables `message` and `callback_query` u
 - `401 Missing or invalid API token`: set `ADMIN_API_TOKEN`, `ANALYST_API_TOKEN`, or `VIEWER_API_TOKEN`, then send `Authorization: Bearer <token>`.
 - `403 Insufficient role`: use `admin` for approve and disable-asset actions; use `analyst` or higher for draft actions.
 - Telegram posts do not appear: confirm the bot is added to the target channel/chat and `TELEGRAM_PUBLIC_CHANNEL_ID` or `TELEGRAM_ADMIN_CHAT_ID` is correct.
-- Webhook not firing: run `pnpm telegram:webhook` and inspect the printed `webhookInfo`.
+- Webhook not firing: run `npx pnpm@10.12.1 telegram:webhook` and inspect the printed `webhookInfo`.
 - Scheduler not running: confirm `ENABLE_SCHEDULER=true` and `REDIS_URL` is reachable.
 - Provider output stale: inspect `GET /health/providers`; stale live data forces cautious no-confirmed-catalyst language.
-- Prisma deploy fails: verify `DATABASE_URL`, run `pnpm db:generate`, then `pnpm db:migrate:deploy`.
+- Prisma deploy fails: verify `DATABASE_URL`, run `npx pnpm@10.12.1 db:generate`, then `npx pnpm@10.12.1 db:migrate:deploy` or first-time `db:push`.
 
 ### Production environment checklist
 
 ```bash
 NODE_ENV=production
-PORT=4000
+PORT=10000
 API_PUBLIC_URL=
 API_BASE_URL=
 CORS_ORIGIN=
 DATABASE_URL=
 REDIS_URL=
 ENABLE_SCHEDULER=true
+LIVE_DATA_ENABLED=true
 API_AUTH_REQUIRED=true
 ADMIN_API_TOKEN=
 ANALYST_API_TOKEN=
@@ -354,9 +364,16 @@ PUBLISHING_MODE=approval_required
 DASHBOARD_BASIC_AUTH_USER=
 DASHBOARD_BASIC_AUTH_PASSWORD=
 DASHBOARD_API_TOKEN=
-FMP_API_KEY=
+MARKET_DATA_PROVIDER=twelve_data
+FOREX_PROVIDER=twelve_data
+COMMODITY_PROVIDER=twelve_data
+INDEX_PROVIDER=twelve_data
+NEWS_PROVIDER=finnhub
+MACRO_PROVIDER=fred
+FILINGS_PROVIDER=sec
+TWELVE_DATA_API_KEY=
 FINNHUB_API_KEY=
-ALPHA_VANTAGE_API_KEY=
+FRED_API_KEY=
 SEC_USER_AGENT=
 ```
 
@@ -364,6 +381,7 @@ SEC_USER_AGENT=
 
 - `GET /health`
 - `GET /health/providers`
+- `GET /debug/provider/:asset`
 - `GET /why/:symbol`
 - `GET /forex/:pair`
 - `GET /commodity/:asset`
@@ -463,65 +481,117 @@ Prompt definitions, input/output schemas, and the style validator live in `packa
 
 Telegram `/status` and the dashboard AI status card show the active AI provider, model, fallback provider, daily AI call count, and fallback count.
 
-## Provider Integration Next Steps
+## Live Provider Operations
 
-Live adapters now live in `packages/data-providers/src/live.ts`. Supported adapter ids:
+Live adapters now live in `packages/data-providers/src/live.ts`. Production defaults:
 
-- `fmp` for quotes, company news, macro calendar, earnings calendar, and sector/index context.
-- `finnhub` for equity/FX quotes, company news, macro calendar, and earnings calendar.
-- `alpha_vantage` for equity/FX/commodity quotes, news sentiment, DXY proxy, and Treasury-yield macro context.
+- `twelve_data` for equities, forex, commodities, indices, symbol search, and mover snapshots.
+- `finnhub` for company news and profile/news context when configured.
+- `fred` for dollar/yield proxy macro context when configured.
 - `sec` for SEC EDGAR company filings. No API key is used, but `SEC_USER_AGENT` must identify your app/contact.
 
-Provider priority is configured per data category:
+Provider routing:
 
 ```bash
-MARKET_DATA_PRIMARY_PROVIDER=fmp
-MARKET_DATA_BACKUP_PROVIDER=alpha_vantage
-NEWS_PRIMARY_PROVIDER=finnhub
-NEWS_BACKUP_PROVIDER=fmp
-MACRO_PRIMARY_PROVIDER=finnhub
-MACRO_BACKUP_PROVIDER=alpha_vantage
-FILINGS_PRIMARY_PROVIDER=sec
-EARNINGS_PRIMARY_PROVIDER=fmp
-EARNINGS_BACKUP_PROVIDER=finnhub
-SECTOR_PRIMARY_PROVIDER=fmp
+LIVE_DATA_ENABLED=true
+MARKET_DATA_PROVIDER=twelve_data
+FOREX_PROVIDER=twelve_data
+COMMODITY_PROVIDER=twelve_data
+INDEX_PROVIDER=twelve_data
+NEWS_PROVIDER=finnhub
+MACRO_PROVIDER=fred
+FILINGS_PROVIDER=sec
 ```
 
-Required keys depend on the adapters you enable:
+Required production keys:
 
 ```bash
-FMP_API_KEY=
+TWELVE_DATA_API_KEY=
+GEMINI_API_KEY=
+TELEGRAM_BOT_TOKEN=
+DATABASE_URL=
+REDIS_URL=
+```
+
+Optional context keys:
+
+```bash
 FINNHUB_API_KEY=
-ALPHA_VANTAGE_API_KEY=
+FRED_API_KEY=
 SEC_USER_AGENT=MarketDeskEngine/0.1 contact@example.com
 ```
 
-Mock fallback is automatic only in `development` and `test`. In production, configure live providers or set `ALLOW_MOCK_PROVIDER_FALLBACK=true` deliberately for a controlled dry run.
+Mock fallback is automatic only in `development` and `test`. In production with `LIVE_DATA_ENABLED=true`, mock data is disabled unless a provider is explicitly set to `mock` for a controlled dry run.
 
-Check provider status:
+Check provider status and debug a symbol:
 
 ```bash
 curl http://localhost:4000/health/providers
+curl http://localhost:4000/debug/provider/NVDA
+curl http://localhost:4000/debug/provider/GOLD
+curl http://localhost:4000/debug/provider/EURUSD
 ```
 
-Each provider health row includes:
-
-- last successful request
-- failed request count
-- rate limit status
-- stale data warning
-
-If configured live sources are missing or stale, catalyst classification is forced into the cautious path and public commentary includes:
+Each provider health row includes last successful request, failed request count, rate-limit status, and stale-data warning. If configured live sources are missing or stale, catalyst classification is forced into the cautious path and public commentary includes:
 
 ```text
 There is no clean confirmed catalyst from available live sources at the time of writing.
 ```
 
+## Render, Telegram, And Debug Checklist
+
+Render API:
+
+```bash
+# Build
+npx pnpm@10.12.1 install --frozen-lockfile && npx pnpm@10.12.1 build
+
+# Start
+npx pnpm@10.12.1 --filter @market-desk/api start
+```
+
+First production database setup:
+
+```bash
+npx pnpm@10.12.1 exec prisma db push --schema prisma/schema.prisma
+npx pnpm@10.12.1 db:seed
+```
+
+Telegram webhook:
+
+```text
+https://api.telegram.org/bot<token>/setWebhook?url=https://<render-url>/webhooks/telegram
+```
+
+Telegram smoke tests:
+
+```text
+/status
+/market
+/why NVDA
+/commodity GOLD
+/forex EURUSD
+/riskcheck buy this stock now
+```
+
+Confirm mocks are disabled:
+
+- `/status` shows `Live data enabled: true`.
+- `/market` no longer says `Global mock brief`.
+- `/why NVDA` returns a real Twelve Data snapshot or a clear provider error.
+- `/debug/provider/NVDA` shows `selectedProvider=twelve_data`.
+
+Security:
+
+- Never screenshot or share API keys.
+- Rotate exposed Telegram, Gemini, database, Redis, or Twelve Data keys immediately.
+- Never commit `.env`; only `.env.example` should contain placeholders.
+
 Next live-data hardening steps:
 
 1. Add provider-specific fixture tests for the exact subscription tier used in production.
 2. Persist provider health and raw source payload metadata in PostgreSQL.
-3. Add cache/TTL policy in Redis per endpoint to reduce rate-limit pressure.
+3. Move the current quote/search/news/filings TTL caches behind Redis where production scale requires shared cache state.
 4. Add alerting when primary and backup providers both degrade.
 
 ## Quality Gates
@@ -531,14 +601,15 @@ The scaffold includes tests for:
 - Catalyst classification
 - Confidence scoring
 - Compliance filtering and rewriting
-- `/why SYMBOL` integration route with mock providers
+- `/why SYMBOL`, `/market`, and live-provider debug routes with mock and Twelve Data fixtures
 
 Run all checks before deploying:
 
 ```bash
-pnpm install
-pnpm lint
-pnpm typecheck
-pnpm test
-pnpm build
+npx pnpm@10.12.1 install
+npx pnpm@10.12.1 lint
+npx pnpm@10.12.1 typecheck
+npx pnpm@10.12.1 test
+npx pnpm@10.12.1 build
+npx pnpm@10.12.1 exec prisma generate --schema prisma/schema.prisma
 ```

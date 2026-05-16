@@ -719,7 +719,7 @@ export class MockAnalystWriter implements AnalystWriter {
     }
 
     return [
-      `${input.subject} is ${promptFormatMove(snapshot.percentChange)} on ${snapshot.relativeVolume.toFixed(2)}x relative volume.`,
+      `${input.subject} is ${promptFormatMove(snapshot.percentChange)}${snapshot.relativeVolume ? ` on ${snapshot.relativeVolume.toFixed(2)}x relative volume` : ""}.`,
       `The move appears linked to ${input.primaryCatalyst.label.toLowerCase()}. ${this.evidenceLine(input)}`,
       `${snapshot.sector} is ${formatMove(snapshot.sectorMove)} and the index context is ${formatMove(snapshot.indexMove)}, so the tape is being checked against both stock-specific and broader participation.`,
       `The next test is whether the catalyst keeps attracting confirmation from news, filings, earnings commentary, or sector follow-through.`

@@ -19,6 +19,7 @@
     "db:generate": "prisma generate --schema prisma/schema.prisma",
     "db:migrate": "prisma migrate dev --schema prisma/schema.prisma",
     "db:migrate:deploy": "prisma migrate deploy --schema prisma/schema.prisma",
+    "db:push": "prisma db push --schema prisma/schema.prisma",
     "db:seed": "tsx prisma/seed.ts",
     "db:seed:watchlist": "tsx prisma/seed-production-watchlist.ts",
     "telegram:webhook": "tsx scripts/set-telegram-webhook.ts",

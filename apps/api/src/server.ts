@@ -6,7 +6,7 @@ import { startScheduler, SchedulerHandle } from "./scheduler";
 
 async function main() {
   const app = await buildApp({ logger: createLoggerOptions() });
-  const port = Number(process.env.PORT ?? 4000);
+  const port = Number(process.env.PORT || 10000);
   const host = "0.0.0.0";
   let scheduler: SchedulerHandle | undefined;
 

@@ -1,13 +1,40 @@
 services:
   - type: web
     name: market-desk-api
-    runtime: docker
-    dockerfilePath: ./apps/api/Dockerfile
+    runtime: node
     plan: starter
+    buildCommand: npx pnpm@10.12.1 install --frozen-lockfile && npx pnpm@10.12.1 build
+    startCommand: npx pnpm@10.12.1 --filter @market-desk/api start
     healthCheckPath: /health
     envVars:
       - key: NODE_ENV
         value: production
+      - key: PORT
+        value: "10000"
+      - key: LIVE_DATA_ENABLED
+        value: "true"
+      - key: MARKET_DATA_PROVIDER
+        value: twelve_data
+      - key: FOREX_PROVIDER
+        value: twelve_data
+      - key: COMMODITY_PROVIDER
+        value: twelve_data
+      - key: INDEX_PROVIDER
+        value: twelve_data
+      - key: NEWS_PROVIDER
+        value: finnhub
+      - key: MACRO_PROVIDER
+        value: fred
+      - key: FILINGS_PROVIDER
+        value: sec
+      - key: AI_PROVIDER
+        value: gemini
+      - key: AI_FALLBACK_PROVIDER
+        value: template
+      - key: GEMINI_MODEL_PRIMARY
+        value: gemini-2.5-flash
+      - key: PUBLISHING_MODE
+        value: approval_required
       - key: API_AUTH_REQUIRED
         value: "true"
       - key: DATABASE_URL
@@ -19,18 +46,35 @@ services:
           type: redis
           name: market-desk-redis
           property: connectionString
-      - key: ADMIN_API_TOKEN
+      - key: TWELVE_DATA_API_KEY
         sync: false
-      - key: OPENAI_API_KEY
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: FINNHUB_API_KEY
+        sync: false
+      - key: FRED_API_KEY
+        sync: false
+      - key: SEC_USER_AGENT
         sync: false
       - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_ADMIN_CHAT_ID
+        sync: false
+      - key: TELEGRAM_PUBLIC_CHANNEL_ID
+        sync: false
+      - key: ADMIN_API_TOKEN
+        sync: false
+      - key: ANALYST_API_TOKEN
+        sync: false
+      - key: VIEWER_API_TOKEN
         sync: false
 
   - type: web
     name: market-desk-dashboard
-    runtime: docker
-    dockerfilePath: ./apps/dashboard/Dockerfile
+    runtime: node
     plan: starter
+    buildCommand: npx pnpm@10.12.1 install --frozen-lockfile && npx pnpm@10.12.1 --filter @market-desk/dashboard build
+    startCommand: npx pnpm@10.12.1 --filter @market-desk/dashboard exec next start -p $PORT
     healthCheckPath: /
     envVars:
       - key: NODE_ENV

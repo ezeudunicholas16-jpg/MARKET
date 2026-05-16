@@ -19,7 +19,8 @@ async function main() {
     marketData: services.providers.marketData,
     compliance: services.compliance,
     telegram: services.telegram,
-    publishing: services.publishing
+    publishing: services.publishing,
+    providerHealth: services.providers.health
   });
 
   console.log(result.text);

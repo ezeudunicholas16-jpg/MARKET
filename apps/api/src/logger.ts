@@ -9,8 +9,11 @@ export function createLoggerOptions(): FastifyServerOptions["logger"] {
         "req.headers.cookie",
         "TELEGRAM_BOT_TOKEN",
         "OPENAI_API_KEY",
+        "GEMINI_API_KEY",
+        "TWELVE_DATA_API_KEY",
         "FMP_API_KEY",
         "FINNHUB_API_KEY",
+        "FRED_API_KEY",
         "ALPHA_VANTAGE_API_KEY"
       ],
       censor: "[redacted]"

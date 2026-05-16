@@ -71,7 +71,7 @@ function snapshotFacts(snapshot: MarketSnapshot): string[] {
   if (snapshot.assetClass === "equity") {
     return [
       `${snapshot.symbol} is ${formatMove(snapshot.percentChange)}.`,
-      `Volume is ${snapshot.volume.toLocaleString()} with relative volume at ${snapshot.relativeVolume.toFixed(2)}x.`,
+      `Volume is ${snapshot.volume.toLocaleString()}${snapshot.relativeVolume ? ` with relative volume at ${snapshot.relativeVolume.toFixed(2)}x` : ""}.`,
       `${snapshot.sector} sector move is ${signedPercent(snapshot.sectorMove)}.`,
       `Index context is ${signedPercent(snapshot.indexMove)}.`,
       ...snapshot.latestNews.map((item) => `News: ${item.headline}`),

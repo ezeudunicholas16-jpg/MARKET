@@ -7,7 +7,7 @@ import {
 } from "@market-desk/analysis-engine";
 import { ComplianceEngine } from "@market-desk/compliance";
 import { MarketSnapshotService, SnapshotNotFoundError } from "@market-desk/core";
-import { createMockProviderBundle, createProviderBundleFromEnv, ProviderBundle } from "@market-desk/data-providers";
+import { createMockProviderBundle, createProviderBundleFromEnv, detectAssetType, ProviderBundle } from "@market-desk/data-providers";
 import { analysisModeSchema } from "@market-desk/shared";
 import { TelegramClient, extractCallbackData, extractMessageText, parseTelegramCommand } from "@market-desk/telegram";
 import Fastify, { FastifyInstance, FastifyServerOptions } from "fastify";
@@ -98,7 +98,10 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   });
 
   app.get("/health", async () => ({
-    ok: true,
+    status: "ok",
+    uptime: process.uptime(),
+    version: "0.1.0",
+    environment: process.env.NODE_ENV ?? "development",
     service: "market-desk-engine",
     providers: process.env.NODE_ENV === "production" ? "live" : "live-with-dev-mock-fallback",
     authRequired: isApiAuthRequired()
@@ -106,8 +109,62 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
 
   app.get("/health/providers", async () => ({
     ok: true,
-    providers: services.providers.health?.getProviderHealth() ?? []
+    providers: services.providers.health?.getProviderHealth() ?? [],
+    configured: {
+      twelveData: Boolean(process.env.TWELVE_DATA_API_KEY),
+      finnhub: Boolean(process.env.FINNHUB_API_KEY),
+      fred: Boolean(process.env.FRED_API_KEY),
+      sec: Boolean(process.env.SEC_USER_AGENT),
+      redis: Boolean(process.env.REDIS_URL),
+      database: Boolean(process.env.DATABASE_URL)
+    }
   }));
+
+  app.get("/debug/provider/:asset", { preHandler: requireRole(["viewer", "analyst", "admin"]) }, async (request) => {
+    const params = z.object({ asset: z.string().min(1) }).parse(request.params);
+    const query = z.object({ refresh: z.coerce.boolean().optional() }).parse(request.query);
+    const assetType = detectAssetType(params.asset);
+    const providerWithDebug = services.providers.marketData as unknown as {
+      debugAsset?: (asset: string, refresh?: boolean) => Promise<Record<string, unknown>>;
+    };
+    if (providerWithDebug.debugAsset) {
+      return providerWithDebug.debugAsset(params.asset, query.refresh ?? false);
+    }
+
+    const quote =
+      assetType === "forex"
+        ? await services.providers.marketData.getForexQuote(params.asset)
+        : assetType === "commodity"
+          ? await services.providers.marketData.getCommodityQuote(params.asset)
+          : assetType === "index"
+            ? await services.providers.marketData.getIndexMove(params.asset)
+            : await services.providers.marketData.getEquityQuote(params.asset);
+    return {
+      requestedAsset: params.asset,
+      detectedAssetType: assetType,
+      selectedProvider: process.env.MARKET_DATA_PROVIDER ?? "provider_router",
+      normalizedSymbol: quote?.providerSymbol ?? quote?.symbol,
+      providerRequestStatus: quote ? "ok" : "not_found",
+      sanitizedData: quote
+        ? {
+            symbol: quote.symbol,
+            providerSymbol: quote.providerSymbol,
+            assetClass: quote.assetClass,
+            price: quote.price,
+            open: quote.open,
+            high: quote.high,
+            low: quote.low,
+            previousClose: quote.previousClose,
+            percentChange: quote.percentChange,
+            asOf: quote.asOf,
+            sourceName: quote.sourceName,
+            providerStatus: quote.providerStatus
+          }
+        : null,
+      sourceTimestamps: quote?.asOf ? [quote.asOf] : [],
+      providerErrors: services.providers.health?.getProviderHealth().map((item) => item.message).filter(Boolean) ?? []
+    };
+  });
 
   app.get("/why/:symbol", { preHandler: requireRole(["viewer", "analyst", "admin"]) }, async (request) => {
     const params = z.object({ symbol: z.string().min(1) }).parse(request.params);
@@ -291,7 +348,8 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
         marketData: services.providers.marketData,
         compliance: services.compliance,
         telegram: services.telegram,
-        publishing: services.publishing
+        publishing: services.publishing,
+        providerHealth: services.providers.health
       },
       message.chatId
     );

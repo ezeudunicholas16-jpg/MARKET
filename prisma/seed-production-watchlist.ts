@@ -2,7 +2,29 @@ import { PrismaClient, AssetClass } from "@prisma/client";
 
 const prisma = new PrismaClient();
 
-const defaultSymbols = ["AAPL", "NVDA", "TSLA", "EURUSD", "GBPUSD", "GOLD", "OIL", "NATGAS", "DXY"];
+const defaultSymbols = [
+  "AAPL",
+  "NVDA",
+  "TSLA",
+  "MSFT",
+  "META",
+  "AMZN",
+  "GOOGL",
+  "AMD",
+  "EURUSD",
+  "GBPUSD",
+  "USDJPY",
+  "USDCAD",
+  "AUDUSD",
+  "GOLD",
+  "SILVER",
+  "OIL",
+  "NATGAS",
+  "SPX",
+  "NDX",
+  "DJI",
+  "DXY"
+];
 const symbols = (process.env.PRODUCTION_WATCHLIST ?? defaultSymbols.join(","))
   .split(",")
   .map((symbol) => symbol.trim().toUpperCase())
@@ -49,7 +71,7 @@ async function main() {
 }
 
 function inferAssetClass(symbol: string): AssetClass {
-  if (["GOLD", "OIL", "NATGAS"].includes(symbol)) {
+  if (["GOLD", "SILVER", "OIL", "NATGAS"].includes(symbol)) {
     return AssetClass.COMMODITY;
   }
   if (/^[A-Z]{6}$/.test(symbol) && !["NATGAS"].includes(symbol)) {

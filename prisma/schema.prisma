@@ -187,3 +187,34 @@ model BotCommandLog {
 
   @@index([command, createdAt])
 }
+
+model AIUsageLog {
+  id                  String   @id @default(cuid())
+  providerName        String
+  model               String
+  promptTokenEstimate Int
+  outputTokenEstimate Int
+  success             Boolean
+  fallbackUsed        Boolean
+  error               String?
+  createdAt           DateTime @default(now())
+
+  @@index([providerName, createdAt])
+}
+
+model ProviderUsageLog {
+  id             String   @id @default(cuid())
+  providerName   String
+  endpoint       String
+  symbol         String?
+  success        Boolean
+  statusCode     Int?
+  rateLimited    Boolean  @default(false)
+  staleData      Boolean  @default(false)
+  error          String?
+  responseTimeMs Int?
+  createdAt      DateTime @default(now())
+
+  @@index([providerName, createdAt])
+  @@index([symbol, createdAt])
+}

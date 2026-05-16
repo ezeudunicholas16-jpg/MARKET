@@ -1,6 +1,6 @@
 import { AnalysisPipeline, AnalysisResult } from "@market-desk/analysis-engine";
 import { ComplianceEngine, ensurePublicDisclaimer } from "@market-desk/compliance";
-import { MarketDataProvider } from "@market-desk/data-providers";
+import { MarketDataProvider, ProviderHealthReporter } from "@market-desk/data-providers";
 import { TelegramClient, ParsedTelegramCommand } from "@market-desk/telegram";
 import { PublishingService } from "./publishing";
 
@@ -10,6 +10,7 @@ export interface CommandContext {
   compliance: ComplianceEngine;
   telegram: TelegramClient;
   publishing: PublishingService;
+  providerHealth?: ProviderHealthReporter;
 }
 
 export interface CommandResult {
@@ -26,7 +27,7 @@ export async function handleTelegramCommand(
   try {
     switch (parsed.command) {
       case "/market":
-        return { status: "ok", text: await marketBrief(context.marketData) };
+        return { status: "ok", text: await marketBrief(context) };
       case "/why":
         return {
           status: "ok",
@@ -73,7 +74,7 @@ export async function handleTelegramCommand(
           text: riskcheckText(context.compliance.review(parsed.rawArgs, { publicOutput: true, sourceCount: 1 }))
         };
       case "/status":
-        return { status: "ok", text: statusText(context.pipeline) };
+        return { status: "ok", text: statusText(context) };
       default:
         return {
           status: "error",
@@ -88,16 +89,29 @@ export async function handleTelegramCommand(
   }
 }
 
-function statusText(pipeline: AnalysisPipeline): string {
-  const ai = pipeline.getAiStatus();
+function statusText(context: CommandContext): string {
+  const ai = context.pipeline.getAiStatus();
+  const health = context.providerHealth?.getProviderHealth() ?? [];
+  const providerErrors = health.filter((item) => item.status === "degraded" || item.status === "down").length;
   return [
     "Market Desk Engine is online.",
+    `Render/public URL: ${process.env.API_PUBLIC_URL || "not configured"}`,
+    `Live data enabled: ${process.env.LIVE_DATA_ENABLED === "true"}`,
+    `Market provider: ${providerLabel(process.env.MARKET_DATA_PROVIDER ?? process.env.MARKET_DATA_PRIMARY_PROVIDER)}`,
+    `Forex provider: ${providerLabel(process.env.FOREX_PROVIDER ?? process.env.MARKET_DATA_PROVIDER)}`,
+    `Commodity provider: ${providerLabel(process.env.COMMODITY_PROVIDER ?? process.env.MARKET_DATA_PROVIDER)}`,
+    `Index provider: ${providerLabel(process.env.INDEX_PROVIDER ?? process.env.MARKET_DATA_PROVIDER)}`,
+    `News provider: Finnhub configured ${Boolean(process.env.FINNHUB_API_KEY)}`,
+    `Macro provider: FRED configured ${Boolean(process.env.FRED_API_KEY)}`,
+    `Filings provider: SEC configured ${Boolean(process.env.SEC_USER_AGENT)}`,
     `AI provider: ${ai.provider}`,
     `Model: ${ai.model}`,
     `Fallback: ${ai.fallbackProvider}`,
     `Today's AI calls: ${ai.todayAiCalls}/${Number.isFinite(ai.maxGenerationsPerDay) ? ai.maxGenerationsPerDay : "unlimited"}`,
     `Today's fallback count: ${ai.todayFallbackCount}`,
-    "Providers: configured through provider router. Scheduler: optional."
+    `Today's provider errors: ${providerErrors}`,
+    `Publishing mode: ${process.env.PUBLISHING_MODE ?? "approval_required"}`,
+    `Scheduler status: ${process.env.ENABLE_SCHEDULER === "true" ? "enabled" : "paused"}`
   ].join("\n");
 }
 
@@ -125,20 +139,64 @@ function researchText(result: AnalysisResult): string {
 
 async function moversText(provider: MarketDataProvider): Promise<string> {
   const movers = await provider.getMovers(6);
+  if (movers.length === 0) {
+    return ensurePublicDisclaimer("No live movers were available from the configured provider. Check /status or /health/providers for provider configuration.");
+  }
   const lines = movers.map(
     (quote, index) =>
-      `${index + 1}. ${quote.symbol}: ${quote.percentChange >= 0 ? "+" : ""}${quote.percentChange.toFixed(2)}%`
+      `${index + 1}. ${quote.symbol}: ${formatSignedPercent(quote.percentChange)} (${quote.assetClass})`
   );
-  return ensurePublicDisclaimer(["Top mock movers", ...lines].join("\n"));
+  return ensurePublicDisclaimer(["Top live movers", ...lines].join("\n"));
 }
 
-async function marketBrief(provider: MarketDataProvider): Promise<string> {
-  const movers = await provider.getMovers(5);
-  const strongest = movers[0];
-  const body = strongest
-    ? `Global mock brief: ${strongest.symbol} is the largest monitored mover at ${strongest.percentChange >= 0 ? "+" : ""}${strongest.percentChange.toFixed(2)}%. Source coverage remains mock-only until live providers are configured.`
-    : "Global mock brief: no movers available from provider feed.";
-  return ensurePublicDisclaimer(body);
+async function marketBrief(context: CommandContext): Promise<string> {
+  const movers = await context.marketData.getMovers(8);
+  const strongest = movers.find((quote) => quote.assetClass !== "index") ?? movers[0];
+
+  if (!strongest) {
+    return ensurePublicDisclaimer(
+      "Market brief: no live movers were available from the configured provider. Check provider configuration before publishing commentary."
+    );
+  }
+
+  const topMoverLines = movers.slice(0, 5).map((quote) => `${quote.symbol} ${formatSignedPercent(quote.percentChange)}`);
+  const draft =
+    strongest.assetClass === "forex"
+      ? await context.pipeline.analyzeForex(strongest.symbol, "forex_reaction")
+      : strongest.assetClass === "commodity"
+        ? await context.pipeline.analyzeCommodity(strongest.symbol, "commodity_reaction")
+        : strongest.assetClass === "equity"
+          ? await context.pipeline.analyzeEquity(strongest.symbol, "equity_mover_reaction")
+          : null;
+
+  if (!draft) {
+    return ensurePublicDisclaimer(
+      [
+        `Market brief: ${strongest.symbol} is the largest monitored mover at ${formatSignedPercent(strongest.percentChange)}.`,
+        `Top monitored moves: ${topMoverLines.join(", ")}.`
+      ].join("\n\n")
+    );
+  }
+
+  return ensurePublicDisclaimer(
+    [stripPublicDisclaimer(draft.draft.body), `Top monitored moves: ${topMoverLines.join(", ")}.`].join("\n\n")
+  );
+}
+
+function stripPublicDisclaimer(text: string): string {
+  return text.replace(/\s*Market commentary only\.\s*$/i, "").trim();
+}
+
+function providerLabel(value?: string): string {
+  const normalized = value?.trim().toLowerCase();
+  if (normalized === "twelve_data") {
+    return "Twelve Data";
+  }
+  return value || "not configured";
+}
+
+function formatSignedPercent(value: number): string {
+  return `${value >= 0 ? "+" : ""}${value.toFixed(2)}%`;
 }
 
 function riskcheckText(result: ReturnType<ComplianceEngine["review"]>): string {

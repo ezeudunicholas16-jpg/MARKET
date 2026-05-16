@@ -1,5 +1,20 @@
-import { describe, expect, it } from "vitest";
-import { createMockProviderBundle, createProviderBundleFromEnv } from "../src";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  LiveSourceRegistry,
+  ProviderConfigError,
+  ProviderResponseError,
+  TwelveDataProvider,
+  createMockProviderBundle,
+  createProviderBundleFromEnv,
+  mapSymbolForTwelveData
+} from "../src";
+
+const originalFetch = global.fetch;
+
+afterEach(() => {
+  global.fetch = originalFetch;
+  vi.restoreAllMocks();
+});
 
 describe("createProviderBundleFromEnv", () => {
   it("uses mock fallback in test when live providers are not configured", async () => {
@@ -39,4 +54,121 @@ describe("createProviderBundleFromEnv", () => {
     expect(JSON.stringify(health)).not.toContain("test-fmp-key");
     expect(JSON.stringify(health)).not.toContain("test-alpha-key");
   });
+
+  it("uses Twelve Data in production when LIVE_DATA_ENABLED is true and does not add mock fallback", async () => {
+    const bundle = createProviderBundleFromEnv(
+      {
+        NODE_ENV: "production",
+        LIVE_DATA_ENABLED: "true",
+        MARKET_DATA_PROVIDER: "twelve_data",
+        TWELVE_DATA_API_KEY: "test-twelve-key"
+      },
+      createMockProviderBundle()
+    );
+
+    expect(bundle.health?.getProviderHealth().some((item) => item.providerId === "mock")).toBe(false);
+    expect(bundle.health?.getProviderHealth().some((item) => item.providerId === "twelve_data:market_data")).toBe(true);
+  });
+
+  it("returns ProviderConfigError when Twelve Data is selected without an API key", async () => {
+    const bundle = createProviderBundleFromEnv(
+      {
+        NODE_ENV: "production",
+        LIVE_DATA_ENABLED: "true",
+        MARKET_DATA_PROVIDER: "twelve_data"
+      },
+      createMockProviderBundle()
+    );
+
+    await expect(bundle.marketData.getEquityQuote("NVDA")).rejects.toBeInstanceOf(ProviderConfigError);
+  });
+
+  it("maps key Twelve Data symbols", () => {
+    expect(mapSymbolForTwelveData("NVDA", "equity").candidates[0]).toBe("NVDA");
+    expect(mapSymbolForTwelveData("EURUSD", "forex").candidates[0]).toBe("EUR/USD");
+    expect(mapSymbolForTwelveData("GOLD", "commodity").candidates[0]).toBe("XAU/USD");
+  });
+
+  it("normalizes Twelve Data equity quote responses", async () => {
+    mockTwelveDataFetch({
+      price: { price: "100" },
+      quote: {
+        symbol: "NVDA",
+        name: "NVIDIA Corporation",
+        exchange: "NASDAQ",
+        currency: "USD",
+        datetime: "2026-05-15",
+        open: "98",
+        high: "101",
+        low: "97",
+        close: "100",
+        previous_close: "95",
+        volume: "1200"
+      }
+    });
+    const provider = new TwelveDataProvider(new LiveSourceRegistry(), "secret-key");
+    const quote = await provider.getEquityQuote("NVDA");
+
+    expect(quote).toMatchObject({
+      symbol: "NVDA",
+      assetClass: "equity",
+      price: 100,
+      previousClose: 95,
+      percentChange: expect.closeTo(5.263, 3),
+      sourceName: "twelve_data",
+      providerSymbol: "NVDA"
+    });
+  });
+
+  it("normalizes Twelve Data forex and commodity symbols", async () => {
+    mockTwelveDataFetch({
+      price: { price: "1.1" },
+      quote: {
+        symbol: "EUR/USD",
+        datetime: "2026-05-15",
+        close: "1.1",
+        previous_close: "1.0",
+        percent_change: "10"
+      }
+    });
+    const forex = await new TwelveDataProvider(new LiveSourceRegistry(), "secret-key").getForexQuote("EURUSD");
+    expect(forex?.providerSymbol).toBe("EUR/USD");
+
+    mockTwelveDataFetch({
+      price: { price: "2400" },
+      quote: {
+        symbol: "XAU/USD",
+        datetime: "2026-05-15",
+        close: "2400",
+        previous_close: "2300",
+        percent_change: "4.3478"
+      }
+    });
+    const commodity = await new TwelveDataProvider(new LiveSourceRegistry(), "secret-key").getCommodityQuote("GOLD");
+    expect(commodity?.providerSymbol).toBe("XAU/USD");
+  });
+
+  it("sanitizes API keys from Twelve Data provider errors", async () => {
+    global.fetch = vi.fn(async () => new Response("fail", { status: 500 })) as typeof fetch;
+    const provider = new TwelveDataProvider(new LiveSourceRegistry(), "super-secret-key");
+
+    await expect(provider.getEquityQuote("NVDA")).rejects.toBeInstanceOf(ProviderResponseError);
+    await expect(provider.getEquityQuote("NVDA")).rejects.not.toThrow("super-secret-key");
+  });
 });
+
+function mockTwelveDataFetch(input: { price: Record<string, unknown>; quote: Record<string, unknown> }): void {
+  global.fetch = vi.fn(async (url: string | URL | Request) => {
+    const value = String(url);
+    if (value.includes("/price")) {
+      return Response.json(input.price);
+    }
+    if (value.includes("/quote")) {
+      return Response.json(input.quote);
+    }
+    if (value.includes("/time_series")) {
+      return Response.json({ values: [] });
+    }
+    return Response.json({ data: [] });
+  }) as typeof fetch;
+}

@@ -10,6 +10,7 @@ import {
   normalizeSymbol,
   nowIso
 } from "@market-desk/shared";
+import { detectAssetType, mapSymbolForTwelveData } from "./symbols";
 import type {
   EarningsProvider,
   FilingsProvider,
@@ -56,6 +57,16 @@ export interface ProviderHealthReporter {
 
 export interface ProviderFactoryEnv {
   NODE_ENV?: string;
+  LIVE_DATA_ENABLED?: string;
+  MARKET_DATA_PROVIDER?: string;
+  FOREX_PROVIDER?: string;
+  COMMODITY_PROVIDER?: string;
+  INDEX_PROVIDER?: string;
+  NEWS_PROVIDER?: string;
+  MACRO_PROVIDER?: string;
+  FILINGS_PROVIDER?: string;
+  EARNINGS_PROVIDER?: string;
+  SECTOR_PROVIDER?: string;
   MARKET_DATA_PRIMARY_PROVIDER?: string;
   MARKET_DATA_BACKUP_PROVIDER?: string;
   NEWS_PRIMARY_PROVIDER?: string;
@@ -69,10 +80,54 @@ export interface ProviderFactoryEnv {
   SECTOR_PRIMARY_PROVIDER?: string;
   SECTOR_BACKUP_PROVIDER?: string;
   ALLOW_MOCK_PROVIDER_FALLBACK?: string;
+  TWELVE_DATA_API_KEY?: string;
   FMP_API_KEY?: string;
   ALPHA_VANTAGE_API_KEY?: string;
   FINNHUB_API_KEY?: string;
+  FRED_API_KEY?: string;
   SEC_USER_AGENT?: string;
+}
+
+export class ProviderConfigError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ProviderConfigError";
+  }
+}
+
+export class ProviderAuthError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ProviderAuthError";
+  }
+}
+
+export class ProviderRateLimitError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ProviderRateLimitError";
+  }
+}
+
+export class ProviderNotFoundError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ProviderNotFoundError";
+  }
+}
+
+export class ProviderResponseError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ProviderResponseError";
+  }
+}
+
+export class ProviderStaleDataError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ProviderStaleDataError";
+  }
 }
 
 const LIVE_WARNING_SOURCE: SourceRecord = {
@@ -204,7 +259,7 @@ abstract class HttpProviderBase implements ProviderHealthReporter {
       providerId: input.providerId,
       providerName: input.providerName,
       category: input.category,
-      configured: Boolean(input.apiKey) || input.providerId === "sec",
+      configured: Boolean(input.apiKey),
       enabled: input.enabled,
       staleAfterMs: input.staleAfterMs
     });
@@ -227,16 +282,23 @@ abstract class HttpProviderBase implements ProviderHealthReporter {
 
       if (response.status === 429) {
         this.reliability.recordRateLimit(response.headers.get("retry-after") ?? undefined);
-        return null;
+        throw new ProviderRateLimitError(`Provider rate limit reached for ${sanitizeProviderUrl(url)}.`);
+      }
+
+      if (response.status === 401 || response.status === 403) {
+        throw new ProviderAuthError(`Provider authentication failed for ${sanitizeProviderUrl(url)}.`);
       }
 
       if (!response.ok) {
-        throw new Error(`HTTP ${response.status} from ${url}`);
+        throw new ProviderResponseError(`HTTP ${response.status} from ${sanitizeProviderUrl(url)}.`);
       }
 
       return (await response.json()) as T;
     } catch (error) {
       this.reliability.recordFailure(error);
+      if (isProviderError(error)) {
+        throw error;
+      }
       return null;
     }
   }
@@ -260,6 +322,419 @@ abstract class HttpProviderBase implements ProviderHealthReporter {
       retrievedAt: nowIso(),
       credibilityScore: input.credibilityScore
     });
+  }
+}
+
+interface TwelveDataQuoteResponse {
+  symbol?: string;
+  name?: string;
+  exchange?: string;
+  currency?: string;
+  datetime?: string;
+  timestamp?: number;
+  open?: string | number;
+  high?: string | number;
+  low?: string | number;
+  close?: string | number;
+  previous_close?: string | number;
+  percent_change?: string | number;
+  change?: string | number;
+  volume?: string | number;
+  status?: string;
+  message?: string;
+  code?: number;
+}
+
+interface TwelveDataSearchResponse {
+  data?: Array<{
+    symbol?: string;
+    instrument_name?: string;
+    exchange?: string;
+    currency?: string;
+    type?: string;
+  }>;
+  status?: string;
+  message?: string;
+}
+
+interface TwelveDataTimeSeriesResponse {
+  values?: Array<{
+    datetime?: string;
+    open?: string | number;
+    high?: string | number;
+    low?: string | number;
+    close?: string | number;
+    volume?: string | number;
+  }>;
+  status?: string;
+  message?: string;
+}
+
+export class TwelveDataProvider extends HttpProviderBase implements MarketDataProvider {
+  private readonly baseUrl = "https://api.twelvedata.com";
+  private readonly quoteCache = new Map<string, { expiresAt: number; quote: Quote }>();
+  private readonly searchCache = new Map<string, { expiresAt: number; symbol: string | null }>();
+
+  constructor(
+    registry: LiveSourceRegistry,
+    private readonly apiKey?: string,
+    category: ProviderCategory = "market_data"
+  ) {
+    super(registry, {
+      providerId: `twelve_data:${category}`,
+      providerName: `Twelve Data (${category})`,
+      category,
+      apiKey,
+      staleAfterMs: 15 * 60 * 1000
+    });
+  }
+
+  async getEquityQuote(symbol: string): Promise<Quote | null> {
+    return this.getQuoteFor(symbol, "equity");
+  }
+
+  async getForexQuote(pair: string): Promise<Quote | null> {
+    return this.getQuoteFor(pair, "forex");
+  }
+
+  async getCommodityQuote(asset: string): Promise<Quote | null> {
+    return this.getQuoteFor(asset, "commodity");
+  }
+
+  async getIndexMove(symbol: string): Promise<Quote | null> {
+    return this.getQuoteFor(symbol, "index");
+  }
+
+  async getMovers(limit = 5): Promise<Quote[]> {
+    const watchlist = [
+      "AAPL",
+      "NVDA",
+      "TSLA",
+      "MSFT",
+      "META",
+      "AMZN",
+      "GOOGL",
+      "AMD",
+      "EURUSD",
+      "GBPUSD",
+      "USDJPY",
+      "USDCAD",
+      "AUDUSD",
+      "GOLD",
+      "SILVER",
+      "OIL",
+      "NATGAS",
+      "SPX",
+      "NDX",
+      "DJI",
+      "DXY"
+    ];
+    const quotes = (
+      await Promise.all(
+        watchlist.map((symbol) => {
+          const assetType = detectAssetType(symbol);
+          if (assetType === "forex") {
+            return this.getForexQuote(symbol);
+          }
+          if (assetType === "commodity") {
+            return this.getCommodityQuote(symbol);
+          }
+          if (assetType === "index") {
+            return this.getIndexMove(symbol);
+          }
+          return this.getEquityQuote(symbol);
+        })
+      )
+    ).filter(isQuote);
+
+    return quotes
+      .sort((a, b) => Math.abs(b.percentChange) - Math.abs(a.percentChange))
+      .slice(0, limit);
+  }
+
+  async debugAsset(symbol: string, refresh = false): Promise<Record<string, unknown>> {
+    const assetType = detectAssetType(symbol);
+    const mapping = mapSymbolForTwelveData(symbol, assetType);
+    const quote = await this.getQuoteFor(symbol, assetType, refresh);
+    return {
+      requestedAsset: symbol,
+      detectedAssetType: assetType,
+      selectedProvider: "twelve_data",
+      normalizedSymbol: quote?.providerSymbol ?? mapping.candidates[0],
+      providerRequestStatus: quote ? "ok" : "not_found",
+      sanitizedData: quote ? sanitizeQuoteForDebug(quote) : null,
+      sourceTimestamps: quote?.asOf ? [quote.asOf] : [],
+      providerErrors: this.getProviderHealth().map((item) => item.message).filter(Boolean)
+    };
+  }
+
+  private async getQuoteFor(
+    input: string,
+    assetClass: Quote["assetClass"],
+    refresh = false
+  ): Promise<Quote | null> {
+    this.assertConfigured();
+    const mapping = mapSymbolForTwelveData(input, assetClass);
+    const cacheKey = `${assetClass}:${mapping.normalized}`;
+    const cached = this.quoteCache.get(cacheKey);
+    if (!refresh && cached && cached.expiresAt > Date.now()) {
+      return cached.quote;
+    }
+
+    let lastError: unknown;
+    for (const candidate of mapping.candidates) {
+      try {
+        const providerSymbol = await this.resolveProviderSymbol(candidate, assetClass, refresh);
+        if (!providerSymbol) {
+          continue;
+        }
+
+        const quote = await this.fetchQuote(providerSymbol, mapping.normalized, assetClass);
+        if (quote) {
+          this.quoteCache.set(cacheKey, { quote, expiresAt: Date.now() + 60_000 });
+          return quote;
+        }
+      } catch (error) {
+        lastError = error;
+      }
+    }
+
+    if (lastError && isProviderError(lastError)) {
+      throw lastError;
+    }
+    throw new ProviderNotFoundError(`Provider could not resolve symbol ${mapping.normalized} through Twelve Data.`);
+  }
+
+  private async fetchQuote(
+    providerSymbol: string,
+    displaySymbol: string,
+    assetClass: Quote["assetClass"]
+  ): Promise<Quote | null> {
+    const params = new URLSearchParams({
+      symbol: providerSymbol,
+      apikey: this.apiKey ?? ""
+    });
+    const row = await this.getJson<TwelveDataQuoteResponse>(`${this.baseUrl}/quote?${params.toString()}`);
+    this.assertTwelveDataOk(row, providerSymbol);
+    if (!row) {
+      return null;
+    }
+
+    const price = numberValue(row.close);
+    const previousClose = numberValue(row.previous_close);
+    const percentChange =
+      numberValue(row.percent_change) ??
+      percentDiff(price, previousClose) ??
+      (await this.percentChangeFromTimeSeries(providerSymbol));
+    if (price === undefined || percentChange === undefined) {
+      return null;
+    }
+
+    const asOf = parseDate(row.datetime) ?? (row.timestamp ? new Date(row.timestamp * 1000).toISOString() : nowIso());
+    const source = this.source({
+      id: `twelve-data-quote-${displaySymbol}`,
+      provider: "twelve_data",
+      type: "market_data",
+      title: `${displaySymbol} quote from Twelve Data`,
+      publishedAt: asOf,
+      credibilityScore: 82
+    });
+    const quote: Quote = {
+      symbol: displaySymbol,
+      assetClass,
+      price,
+      open: numberValue(row.open),
+      high: numberValue(row.high),
+      low: numberValue(row.low),
+      previousClose,
+      percentChange,
+      volume: numberValue(row.volume),
+      relativeVolume: undefined,
+      asOf,
+      sourceId: source.id,
+      sourceName: "twelve_data",
+      providerSymbol,
+      providerStatus: sanitizeProviderStatus(row as unknown as Record<string, unknown>),
+      isStale: isOlderThan(asOf, 24 * 60 * 60 * 1000)
+    };
+    this.reliability.recordSuccess(asOf);
+    return quote;
+  }
+
+  private async resolveProviderSymbol(candidate: string, assetClass: Quote["assetClass"], refresh: boolean): Promise<string | null> {
+    const cacheKey = `${assetClass}:${candidate}`;
+    const cached = this.searchCache.get(cacheKey);
+    if (!refresh && cached && cached.expiresAt > Date.now()) {
+      return cached.symbol;
+    }
+
+    let directSymbolWorks = false;
+    try {
+      directSymbolWorks = await this.symbolWorks(candidate);
+    } catch (error) {
+      if (error instanceof ProviderAuthError || error instanceof ProviderRateLimitError) {
+        throw error;
+      }
+    }
+
+    if (directSymbolWorks) {
+      this.searchCache.set(cacheKey, { symbol: candidate, expiresAt: Date.now() + 24 * 60 * 60 * 1000 });
+      return candidate;
+    }
+
+    const params = new URLSearchParams({
+      symbol: candidate,
+      apikey: this.apiKey ?? ""
+    });
+    const payload = await this.getJson<TwelveDataSearchResponse>(`${this.baseUrl}/symbol_search?${params.toString()}`);
+    this.assertTwelveDataOk(payload, candidate);
+    const match = payload?.data?.find((item) => item.symbol);
+    const symbol = match?.symbol ?? null;
+    this.searchCache.set(cacheKey, { symbol, expiresAt: Date.now() + 24 * 60 * 60 * 1000 });
+    return symbol;
+  }
+
+  private async symbolWorks(symbol: string): Promise<boolean> {
+    const params = new URLSearchParams({
+      symbol,
+      apikey: this.apiKey ?? ""
+    });
+    const payload = await this.getJson<TwelveDataQuoteResponse>(`${this.baseUrl}/price?${params.toString()}`);
+    this.assertTwelveDataOk(payload, symbol);
+    return Boolean(numberValue((payload as Record<string, unknown> | null)?.price));
+  }
+
+  private async percentChangeFromTimeSeries(symbol: string): Promise<number | undefined> {
+    const params = new URLSearchParams({
+      symbol,
+      interval: "1day",
+      outputsize: "2",
+      apikey: this.apiKey ?? ""
+    });
+    const payload = await this.getJson<TwelveDataTimeSeriesResponse>(`${this.baseUrl}/time_series?${params.toString()}`);
+    this.assertTwelveDataOk(payload, symbol);
+    const latest = payload?.values?.[0];
+    const previous = payload?.values?.[1];
+    return percentDiff(numberValue(latest?.close), numberValue(previous?.close));
+  }
+
+  private assertConfigured(): void {
+    if (!this.apiKey) {
+      throw new ProviderConfigError("TWELVE_DATA_API_KEY is required when Twelve Data is selected.");
+    }
+  }
+
+  private assertTwelveDataOk(payload: { status?: string; message?: string; code?: number } | null, symbol: string): void {
+    if (!payload || payload.status !== "error") {
+      return;
+    }
+    const message = payload.message ?? `Twelve Data returned an error for ${symbol}.`;
+    if (payload.code === 401 || /api key|apikey|unauthorized/i.test(message)) {
+      throw new ProviderAuthError(`Twelve Data authentication failed for ${symbol}.`);
+    }
+    if (payload.code === 429 || /rate limit|credits|too many/i.test(message)) {
+      this.reliability.recordRateLimit();
+      throw new ProviderRateLimitError(`Twelve Data rate limit reached for ${symbol}.`);
+    }
+    throw new ProviderResponseError(`Twelve Data response error for ${symbol}: ${message}`);
+  }
+}
+
+export class FredProvider extends HttpProviderBase implements MacroProvider {
+  private readonly baseUrl = "https://api.stlouisfed.org/fred/series/observations";
+
+  constructor(
+    registry: LiveSourceRegistry,
+    private readonly apiKey?: string,
+    category: ProviderCategory = "macro"
+  ) {
+    super(registry, {
+      providerId: `fred:${category}`,
+      providerName: `FRED (${category})`,
+      category,
+      apiKey,
+      staleAfterMs: 24 * 60 * 60 * 1000
+    });
+  }
+
+  async getMacroEvents(): Promise<MacroEvent[]> {
+    return [];
+  }
+
+  async getDxyContext(): Promise<MacroContext> {
+    return this.seriesContext("DTWEXBGS", "DXY/proxy dollar index");
+  }
+
+  async getYieldContext(): Promise<MacroContext> {
+    return this.seriesContext("DGS10", "U.S. 10Y yield");
+  }
+
+  async getCentralBankContext(pair: string): Promise<MacroContext> {
+    return liveNoCatalystContext(
+      `${normalizeSymbol(pair)} central-bank context`,
+      "Central-bank context unavailable from configured macro provider."
+    );
+  }
+
+  async getInventoryContext(asset: string): Promise<MacroContext> {
+    return liveNoCatalystContext(`${normalizeSymbol(asset)} inventory context`, "Inventory data unavailable from configured macro provider.");
+  }
+
+  async getSupplyDemandContext(asset: string): Promise<MacroContext> {
+    return liveNoCatalystContext(
+      `${normalizeSymbol(asset)} supply-demand context`,
+      "Supply-demand context unavailable from configured macro provider."
+    );
+  }
+
+  async getGeopoliticalContext(asset: string): Promise<MacroContext> {
+    return liveNoCatalystContext(
+      `${normalizeSymbol(asset)} geopolitical context`,
+      "Geopolitical context unavailable from configured macro provider."
+    );
+  }
+
+  private async seriesContext(seriesId: string, label: string): Promise<MacroContext> {
+    if (!this.apiKey) {
+      return liveNoCatalystContext(label, `${label} unavailable because FRED_API_KEY is not configured.`);
+    }
+
+    const params = new URLSearchParams({
+      series_id: seriesId,
+      api_key: this.apiKey,
+      file_type: "json",
+      sort_order: "desc",
+      limit: "2"
+    });
+    const payload = await this.getJson<{ observations?: Array<{ date?: string; value?: string }> }>(
+      `${this.baseUrl}?${params.toString()}`
+    );
+    const latest = payload?.observations?.[0];
+    const previous = payload?.observations?.[1];
+    const latestValue = numberValue(latest?.value);
+    const previousValue = numberValue(previous?.value);
+    if (latestValue === undefined) {
+      return liveNoCatalystContext(label, `${label} unavailable from FRED.`);
+    }
+
+    const change = previousValue === undefined ? undefined : latestValue - previousValue;
+    const asOf = latest?.date ? new Date(`${latest.date}T00:00:00Z`).toISOString() : nowIso();
+    const source = this.source({
+      id: `fred-${seriesId}`,
+      provider: "fred",
+      type: "macro",
+      title: `${label} from FRED`,
+      publishedAt: asOf,
+      credibilityScore: 90
+    });
+    this.reliability.recordSuccess(asOf);
+    return {
+      label,
+      value: `${label} latest ${latestValue}${change === undefined ? "" : `, change ${change >= 0 ? "+" : ""}${change.toFixed(2)}`}.`,
+      bias: change === undefined ? "mixed" : change >= 0 ? "pressuring" : "supportive",
+      sourceId: source.id,
+      asOf
+    };
   }
 }
 
@@ -1118,16 +1593,47 @@ export class FallbackMarketDataProvider implements MarketDataProvider {
   async getMovers(limit?: number): Promise<Quote[]> {
     return firstArray(this.providers, (provider) => provider.getMovers(limit), this.health);
   }
+
+  async debugAsset(symbol: string, refresh = false): Promise<Record<string, unknown>> {
+    for (const provider of this.providers) {
+      const debugProvider = provider as MarketDataProvider & {
+        debugAsset?: (asset: string, refresh?: boolean) => Promise<Record<string, unknown>>;
+      };
+      if (debugProvider.debugAsset) {
+        return debugProvider.debugAsset(symbol, refresh);
+      }
+    }
+    return {
+      requestedAsset: symbol,
+      selectedProvider: "provider_router",
+      providerRequestStatus: "debug_unavailable",
+      providerErrors: ["No selected market data provider exposes debugAsset."]
+    };
+  }
 }
 
 export class FallbackNewsProvider implements NewsProvider {
+  private readonly cache = new Map<string, { expiresAt: number; items: NewsItem[] }>();
+
   constructor(
     private readonly providers: NewsProvider[],
     private readonly health: ProviderRouterHealth
   ) {}
 
-  getLatestNews(input: { symbol?: string; assetClass?: AssetClass; limit?: number }): Promise<NewsItem[]> {
-    return firstArray(this.providers, (provider) => provider.getLatestNews(input), this.health);
+  async getLatestNews(input: { symbol?: string; assetClass?: AssetClass; limit?: number }): Promise<NewsItem[]> {
+    const cacheKey = JSON.stringify({
+      symbol: input.symbol ? normalizeSymbol(input.symbol) : undefined,
+      assetClass: input.assetClass,
+      limit: input.limit
+    });
+    const cached = this.cache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.items;
+    }
+
+    const items = await firstArray(this.providers, (provider) => provider.getLatestNews(input), this.health);
+    this.cache.set(cacheKey, { items, expiresAt: Date.now() + 5 * 60 * 1000 });
+    return items;
   }
 }
 
@@ -1187,13 +1693,23 @@ export class FallbackMacroProvider implements MacroProvider {
 }
 
 export class FallbackFilingsProvider implements FilingsProvider {
+  private readonly cache = new Map<string, { expiresAt: number; items: FilingRecord[] }>();
+
   constructor(
     private readonly providers: FilingsProvider[],
     private readonly health: ProviderRouterHealth
   ) {}
 
-  getLatestFilings(symbol: string): Promise<FilingRecord[]> {
-    return firstArray(this.providers, (provider) => provider.getLatestFilings(symbol), this.health);
+  async getLatestFilings(symbol: string): Promise<FilingRecord[]> {
+    const cacheKey = normalizeSymbol(symbol);
+    const cached = this.cache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.items;
+    }
+
+    const items = await firstArray(this.providers, (provider) => provider.getLatestFilings(symbol), this.health);
+    this.cache.set(cacheKey, { items, expiresAt: Date.now() + 15 * 60 * 1000 });
+    return items;
   }
 }
 
@@ -1308,6 +1824,7 @@ function buildProviders<T>(
   predicate: (provider: unknown) => provider is T
 ): T[] {
   const providerNames = [
+    ...modernProviderNames(env, prefix),
     env[`${prefix}_PRIMARY_PROVIDER` as keyof ProviderFactoryEnv],
     env[`${prefix}_BACKUP_PROVIDER` as keyof ProviderFactoryEnv]
   ]
@@ -1325,6 +1842,9 @@ function instantiateProvider(
   registry: LiveSourceRegistry,
   category: ProviderCategory
 ): unknown {
+  if (providerName === "twelve_data" || providerName === "twelvedata") {
+    return new TwelveDataProvider(registry, env.TWELVE_DATA_API_KEY, category);
+  }
   if (providerName === "fmp") {
     return new FmpProvider(registry, env.FMP_API_KEY, category);
   }
@@ -1336,6 +1856,9 @@ function instantiateProvider(
   }
   if (providerName === "sec") {
     return new SecFilingsProvider(registry, env.SEC_USER_AGENT);
+  }
+  if (providerName === "fred") {
+    return new FredProvider(registry, env.FRED_API_KEY, category);
   }
   return undefined;
 }
@@ -1354,12 +1877,37 @@ function categoryFromPrefix(
   return map[prefix];
 }
 
+function modernProviderNames(
+  env: ProviderFactoryEnv,
+  prefix: "MARKET_DATA" | "NEWS" | "MACRO" | "FILINGS" | "EARNINGS" | "SECTOR"
+): Array<string | undefined> {
+  if (prefix === "MARKET_DATA") {
+    return [env.MARKET_DATA_PROVIDER, env.FOREX_PROVIDER, env.COMMODITY_PROVIDER, env.INDEX_PROVIDER];
+  }
+  if (prefix === "NEWS") {
+    return [env.NEWS_PROVIDER];
+  }
+  if (prefix === "MACRO") {
+    return [env.MACRO_PROVIDER];
+  }
+  if (prefix === "FILINGS") {
+    return [env.FILINGS_PROVIDER];
+  }
+  if (prefix === "EARNINGS") {
+    return [env.EARNINGS_PROVIDER];
+  }
+  return [env.SECTOR_PROVIDER];
+}
+
 function isMockFallbackAllowed(env: ProviderFactoryEnv): boolean {
   if (env.ALLOW_MOCK_PROVIDER_FALLBACK === "true") {
     return true;
   }
   if (env.ALLOW_MOCK_PROVIDER_FALLBACK === "false") {
     return false;
+  }
+  if (env.LIVE_DATA_ENABLED === "true" && env.NODE_ENV === "production") {
+    return modernProviderNames(env, "MARKET_DATA").some((provider) => normalizeProviderName(String(provider)) === "mock");
   }
   return env.NODE_ENV === "development" || env.NODE_ENV === "test" || !env.NODE_ENV;
 }
@@ -1369,11 +1917,19 @@ async function firstResult<TProvider, TResult>(
   call: (provider: TProvider) => Promise<TResult | null>,
   health: ProviderRouterHealth
 ): Promise<TResult | null> {
+  let lastError: unknown;
   for (const provider of providers) {
-    const result = await call(provider);
-    if (result) {
-      return result;
+    try {
+      const result = await call(provider);
+      if (result) {
+        return result;
+      }
+    } catch (error) {
+      lastError = error;
     }
+  }
+  if (lastError && providers.length > 0) {
+    throw lastError;
   }
   health.noteMissingLiveData();
   return null;
@@ -1384,11 +1940,19 @@ async function firstArray<TProvider, TResult>(
   call: (provider: TProvider) => Promise<TResult[]>,
   health: ProviderRouterHealth
 ): Promise<TResult[]> {
+  let lastError: unknown;
   for (const provider of providers) {
-    const result = await call(provider);
-    if (result.length > 0) {
-      return result;
+    try {
+      const result = await call(provider);
+      if (result.length > 0) {
+        return result;
+      }
+    } catch (error) {
+      lastError = error;
     }
+  }
+  if (lastError && providers.length > 0) {
+    throw lastError;
   }
   health.noteMissingLiveData();
   return [];
@@ -1399,11 +1963,19 @@ async function firstNumber<TProvider>(
   call: (provider: TProvider) => Promise<number>,
   health: ProviderRouterHealth
 ): Promise<number> {
+  let lastError: unknown;
   for (const provider of providers) {
-    const result = await call(provider);
-    if (result !== 0) {
-      return result;
+    try {
+      const result = await call(provider);
+      if (result !== 0) {
+        return result;
+      }
+    } catch (error) {
+      lastError = error;
     }
+  }
+  if (lastError && providers.length > 0) {
+    throw lastError;
   }
   health.noteMissingLiveData();
   return 0;
@@ -1415,11 +1987,19 @@ async function firstContext<TProvider>(
   health: ProviderRouterHealth,
   label: string
 ): Promise<MacroContext> {
+  let lastError: unknown;
   for (const provider of providers) {
-    const result = await call(provider);
-    if (result.sourceId !== LIVE_WARNING_SOURCE.id) {
-      return result;
+    try {
+      const result = await call(provider);
+      if (result.sourceId !== LIVE_WARNING_SOURCE.id) {
+        return result;
+      }
+    } catch (error) {
+      lastError = error;
     }
+  }
+  if (lastError && providers.length > 0) {
+    throw lastError;
   }
   health.noteMissingLiveData();
   return liveNoCatalystContext(label, "There is no clean confirmed catalyst from available live sources at the time of writing.");
@@ -1608,4 +2188,55 @@ function isOlderThan(isoDate: string, maxAgeMs: number): boolean {
     return true;
   }
   return Date.now() - time > maxAgeMs;
+}
+
+function sanitizeProviderUrl(url: string): string {
+  try {
+    const parsed = new URL(url);
+    for (const key of ["apikey", "api_key", "token"]) {
+      if (parsed.searchParams.has(key)) {
+        parsed.searchParams.set(key, "[redacted]");
+      }
+    }
+    return parsed.toString();
+  } catch {
+    return url.replace(/(apikey|api_key|token)=([^&\s]+)/gi, "$1=[redacted]");
+  }
+}
+
+function sanitizeProviderStatus(input: Record<string, unknown>): Record<string, unknown> {
+  const blocked = new Set(["apikey", "api_key", "token", "key"]);
+  return Object.fromEntries(Object.entries(input).filter(([key]) => !blocked.has(key.toLowerCase())));
+}
+
+function sanitizeQuoteForDebug(quote: Quote): Record<string, unknown> {
+  return {
+    symbol: quote.symbol,
+    providerSymbol: quote.providerSymbol,
+    assetClass: quote.assetClass,
+    price: quote.price,
+    open: quote.open,
+    high: quote.high,
+    low: quote.low,
+    previousClose: quote.previousClose,
+    percentChange: quote.percentChange,
+    volume: quote.volume,
+    relativeVolume: quote.relativeVolume,
+    asOf: quote.asOf,
+    sourceId: quote.sourceId,
+    sourceName: quote.sourceName,
+    isStale: quote.isStale,
+    providerStatus: quote.providerStatus
+  };
+}
+
+function isProviderError(error: unknown): boolean {
+  return (
+    error instanceof ProviderConfigError ||
+    error instanceof ProviderAuthError ||
+    error instanceof ProviderRateLimitError ||
+    error instanceof ProviderNotFoundError ||
+    error instanceof ProviderResponseError ||
+    error instanceof ProviderStaleDataError
+  );
 }
