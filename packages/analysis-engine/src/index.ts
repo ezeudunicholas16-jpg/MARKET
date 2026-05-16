@@ -428,6 +428,9 @@ export interface AiUsageRecord {
   success: boolean;
   fallbackUsed: boolean;
   callAttempted: boolean;
+  rawResponseUsable?: boolean;
+  jsonParseRecovered?: boolean;
+  responseMode?: "text" | "json";
   timestamp: string;
   error?: string;
   fallbackReason?: string;
@@ -448,6 +451,9 @@ export interface AiProviderStatus {
   lastProviderAttempted?: string;
   lastCallAttempted?: boolean;
   lastGeminiSuccess?: boolean;
+  lastGeminiRawResponseUsable?: boolean;
+  lastGeminiJsonParseRecovered?: boolean;
+  lastGeminiResponseMode?: "text" | "json";
   lastFallbackReason?: string;
   lastGeminiError?: string;
   geminiConfigured?: boolean;
@@ -509,7 +515,10 @@ export class OpenAIAnalystWriter implements AnalystWriter {
       recentUsage: [],
       lastProviderUsed: "openai",
       lastProviderAttempted: "none",
-      lastCallAttempted: false
+      lastCallAttempted: false,
+      lastGeminiRawResponseUsable: false,
+      lastGeminiJsonParseRecovered: false,
+      lastGeminiResponseMode: "text"
     };
   }
 
@@ -584,6 +593,9 @@ export class MockAnalystWriter implements AnalystWriter {
       lastProviderAttempted: "none",
       lastCallAttempted: false,
       lastGeminiSuccess: false,
+      lastGeminiRawResponseUsable: false,
+      lastGeminiJsonParseRecovered: false,
+      lastGeminiResponseMode: "text",
       lastFallbackReason: "template writer selected"
     };
   }
@@ -763,7 +775,7 @@ export class MockAnalystWriter implements AnalystWriter {
           : `the index read is ${formatMove(snapshot.indexMove)}`;
       return [
         `${input.subject} is ${promptFormatMove(snapshot.percentChange)}. There is no clean confirmed catalyst from available live sources at the time of writing.`,
-        `The useful read is that price action is visible, but the source set does not yet confirm whether the move is stock-specific, sector-led, earnings-related, or macro-driven.`,
+        `For the stock read, the available checks are company headlines, filings, earnings context, sector participation, and index direction; none of those is confirming a single driver yet.`,
         `${context}, so the equity move should be framed against broader tape participation rather than treated as a standalone confirmed story.`,
         `For a stronger read, the desk would need a credible headline, filing, earnings update, analyst action, or clearer sector follow-through.`
       ].join("\n\n");
@@ -772,16 +784,16 @@ export class MockAnalystWriter implements AnalystWriter {
     if (snapshot.assetClass === "commodity") {
       return [
         `${input.subject} is ${promptFormatMove(snapshot.percentChange)}. There is no clean confirmed catalyst from available live sources at the time of writing.`,
-        `For this commodity read, the important checks are the dollar, yields, inventory data, supply-demand inputs, and geopolitical risk. ${this.cleanPublicEvidence(snapshot.dollarContext.value)}; ${this.cleanPublicEvidence(snapshot.yieldContext.value)}.`,
-        `Without a confirmed inventory, supply, or macro release driving the move, the safer framing is that price action is live but the catalyst is not cleanly sourced.`,
-        `A clearer dollar/yield shift, official inventory update, or credible supply-demand headline would change the confidence level.`
+        `For this commodity read, the important checks are the dollar, yields, macro data, inventory data, supply-demand inputs, and geopolitical risk. ${this.cleanPublicEvidence(snapshot.dollarContext.value)}; ${this.cleanPublicEvidence(snapshot.yieldContext.value)}.`,
+        `For gold specifically, consolidation around the dollar and yield path matters because the move can look firm without being tied to a clean safe-haven or inflation catalyst.`,
+        `A clearer dollar/yield shift, official inventory update, macro release, or credible supply-demand headline would change the confidence level.`
       ].join("\n\n");
     }
 
     if (snapshot.assetClass === "forex") {
       return [
         `${input.subject} is ${promptFormatMove(snapshot.percentChange)}. There is no clean confirmed catalyst from available live sources at the time of writing.`,
-        `The FX read should stay anchored to dollar momentum, yields, central-bank expectations, and scheduled macro data. ${this.cleanPublicEvidence(snapshot.dxyContext.value)}; ${this.cleanPublicEvidence(snapshot.yieldContext.value)}.`,
+        `The FX read should stay anchored to dollar momentum, rates, yields, central-bank expectations, and scheduled macro data. ${this.cleanPublicEvidence(snapshot.dxyContext.value)}; ${this.cleanPublicEvidence(snapshot.yieldContext.value)}.`,
         `Without a confirmed macro release or central-bank headline, the pair should be described as moving on available price action rather than a clean fundamental catalyst.`,
         `The next useful evidence would be a data print, policy comment, or clearer DXY/yield confirmation.`
       ].join("\n\n");
@@ -789,7 +801,7 @@ export class MockAnalystWriter implements AnalystWriter {
 
     return [
       `${input.subject} is ${promptFormatMove(promptSnapshotMove(input.snapshot))}. There is no clean confirmed catalyst from available live sources at the time of writing.`,
-      `Price action is available, yet the source set does not provide enough support to frame the move as company-specific, macro-driven, earnings-related, or supply-demand driven.`,
+      `The available source checks do not support a clean company-specific, macro-driven, earnings-related, or supply-demand explanation yet.`,
       `The right stance is caution: wait for a filing, official release, credible news item, or clearer macro alignment before assigning a stronger explanation.`
     ].join("\n\n");
   }
@@ -868,8 +880,7 @@ export class GeminiAnalystWriter implements AnalystWriter {
     const today = this.tracker.today(this.providerName);
     const recentUsage = this.tracker.list().slice(-10);
     const last = recentUsage.at(-1);
-    const lastFallback = [...recentUsage].reverse().find((record) => record.fallbackUsed);
-    const lastGeminiError = [...recentUsage].reverse().find((record) => !record.success && record.callAttempted);
+    const lastGeminiError = last && !last.success && last.callAttempted ? last : undefined;
     const todayAttemptedAiCalls = today.filter((record) => record.callAttempted).length;
     const todaySuccessfulAiCalls = today.filter((record) => record.success && !record.fallbackUsed).length;
     return {
@@ -887,7 +898,10 @@ export class GeminiAnalystWriter implements AnalystWriter {
       lastProviderAttempted: last?.callAttempted ? last.providerName : "none",
       lastCallAttempted: last?.callAttempted ?? false,
       lastGeminiSuccess: last?.callAttempted ? last.success && !last.fallbackUsed : false,
-      lastFallbackReason: lastFallback?.fallbackReason,
+      lastGeminiRawResponseUsable: last?.rawResponseUsable ?? false,
+      lastGeminiJsonParseRecovered: last?.jsonParseRecovered ?? false,
+      lastGeminiResponseMode: last?.responseMode ?? "text",
+      lastFallbackReason: last?.fallbackUsed ? last.fallbackReason : undefined,
       lastGeminiError: lastGeminiError?.error,
       geminiConfigured: Boolean(this.client)
     };
@@ -959,16 +973,23 @@ export class GeminiAnalystWriter implements AnalystWriter {
     const promptDefinition = getAnalystPromptDefinition(input.mode);
     const promptInput = buildAnalystPromptInput(input);
     const facts = buildGeminiFacts(input);
+    const publicOutput = promptDefinition.publicOutput;
     const userPrompt = [
       "Write the final analyst commentary from this structured evidence only.",
       "Do not browse the web. Do not infer missing market data. Do not add facts that are not present here.",
+      "Do not use markdown tables. Do not use buy, sell, entry, signal, hype, or 'as an AI' language.",
+      publicOutput
+        ? "Return plain text commentary only. Do not return JSON, markdown code fences, or labels. End with exactly: Market commentary only."
+        : "Return the final note as plain text unless JSON is explicitly easier. If using JSON, keep it simple with a single text field.",
       rewriteBody
         ? "Rewrite the prior draft to remove compliance/style risk while preserving the evidence-led market read."
         : "Return a fresh draft.",
       JSON.stringify(
         {
           mode: input.mode,
-          requiredOutput: "JSON only with title, body, sourcesUsed.",
+          requiredOutput: publicOutput
+            ? "Plain text final commentary only."
+            : "Plain text note, or JSON object with text/commentary/body.",
           structuredFacts: facts,
           priorDraft: rewriteBody,
           riskFlagsToRemove: flags,
@@ -991,17 +1012,25 @@ export class GeminiAnalystWriter implements AnalystWriter {
       contents: userPrompt,
       config: {
         systemInstruction: promptDefinition.systemPrompt,
-        responseMimeType: "application/json",
+        responseMimeType: "text/plain",
         maxOutputTokens: this.maxOutputTokensPerRequest,
         temperature: 0.35
       }
     });
     const raw = response?.text;
     if (!raw) {
-      throw new Error("Gemini response did not include text.");
+      throw new Error("Gemini response was empty.");
     }
 
-    const parsed = promptDefinition.outputSchema.parse(JSON.parse(extractJson(raw)));
+    const normalized = normalizeGeminiResponse(raw, {
+      fallbackTitle: `${promptInput.subject}: ${top.label}`,
+      fallbackSourcesUsed: top.sourceIds.length > 0 ? top.sourceIds : promptInput.sources.map((source) => source.id)
+    });
+    const parsed = promptDefinition.outputSchema.parse({
+      title: normalized.title,
+      body: normalized.body,
+      sourcesUsed: normalized.sourcesUsed
+    });
     const body = promptDefinition.publicOutput ? ensurePublicDisclaimer(parsed.body) : parsed.body;
     assertAnalystStyle(body, {
       mode: input.mode,
@@ -1015,14 +1044,19 @@ export class GeminiAnalystWriter implements AnalystWriter {
       outputTokenEstimate: estimateTokens(body),
       success: true,
       fallbackUsed: false,
-      callAttempted: true
+      callAttempted: true,
+      rawResponseUsable: normalized.rawResponseUsable,
+      jsonParseRecovered: normalized.jsonParseRecovered,
+      responseMode: normalized.responseMode
     });
     this.logRoute({
       selectedProvider: this.providerName,
       geminiConfigured: Boolean(this.client),
       callAttempted: true,
       success: true,
-      fallbackUsed: false
+      fallbackUsed: false,
+      jsonParseRecovered: normalized.jsonParseRecovered,
+      responseMode: normalized.responseMode
     });
 
     return analysisDraftSchema.parse({
@@ -1065,6 +1099,9 @@ export class GeminiAnalystWriter implements AnalystWriter {
       success: false,
       fallbackUsed: true,
       callAttempted: Boolean(this.client),
+      rawResponseUsable: false,
+      jsonParseRecovered: false,
+      responseMode: "text",
       error: sanitizeAiMessage(reason),
       fallbackReason: sanitizeAiMessage(reason)
     });
@@ -1086,6 +1123,8 @@ export class GeminiAnalystWriter implements AnalystWriter {
     success: boolean;
     fallbackUsed: boolean;
     fallbackReason?: string;
+    jsonParseRecovered?: boolean;
+    responseMode?: "text" | "json";
   }): void {
     console.info("AI routing", {
       selectedAiProvider: input.selectedProvider,
@@ -1093,7 +1132,9 @@ export class GeminiAnalystWriter implements AnalystWriter {
       geminiCallAttempted: input.callAttempted,
       geminiSuccess: input.success,
       fallbackUsed: input.fallbackUsed,
-      fallbackReason: input.fallbackReason
+      fallbackReason: input.fallbackReason,
+      jsonParseRecovered: input.jsonParseRecovered,
+      responseMode: input.responseMode
     });
   }
 }
@@ -1142,7 +1183,10 @@ export class AnalysisPipeline {
       recentUsage: [],
       lastProviderUsed: "unknown",
       lastProviderAttempted: "none",
-      lastCallAttempted: false
+      lastCallAttempted: false,
+      lastGeminiRawResponseUsable: false,
+      lastGeminiJsonParseRecovered: false,
+      lastGeminiResponseMode: "text"
     };
   }
 
@@ -1285,6 +1329,162 @@ export async function debugGeminiFromEnv(
   }
 }
 
+interface NormalizedGeminiResponse {
+  title: string;
+  body: string;
+  sourcesUsed: string[];
+  rawResponseUsable: boolean;
+  jsonParseRecovered: boolean;
+  responseMode: "text" | "json";
+}
+
+function normalizeGeminiResponse(
+  raw: string,
+  fallback: { fallbackTitle: string; fallbackSourcesUsed: string[] }
+): NormalizedGeminiResponse {
+  const cleaned = stripMarkdownCodeFence(raw).trim();
+  if (!cleaned) {
+    throw new Error("Gemini response was empty.");
+  }
+
+  if (appearsToBeJson(cleaned)) {
+    try {
+      const parsed = JSON.parse(cleaned) as unknown;
+      const fromJson = responseFromParsedJson(parsed, fallback);
+      if (fromJson) {
+        return {
+          ...fromJson,
+          rawResponseUsable: true,
+          jsonParseRecovered: false,
+          responseMode: "json"
+        };
+      }
+    } catch {
+      const recovered = recoverTextFromMalformedJson(cleaned);
+      if (recovered) {
+        return {
+          title: fallback.fallbackTitle,
+          body: recovered,
+          sourcesUsed: fallbackSources(fallback.fallbackSourcesUsed),
+          rawResponseUsable: true,
+          jsonParseRecovered: true,
+          responseMode: "text"
+        };
+      }
+    }
+  }
+
+  return {
+    title: fallback.fallbackTitle,
+    body: cleaned,
+    sourcesUsed: fallbackSources(fallback.fallbackSourcesUsed),
+    rawResponseUsable: true,
+    jsonParseRecovered: false,
+    responseMode: "text"
+  };
+}
+
+function responseFromParsedJson(
+  parsed: unknown,
+  fallback: { fallbackTitle: string; fallbackSourcesUsed: string[] }
+): Pick<NormalizedGeminiResponse, "title" | "body" | "sourcesUsed"> | null {
+  if (typeof parsed === "string") {
+    const body = parsed.trim();
+    return body
+      ? {
+          title: fallback.fallbackTitle,
+          body,
+          sourcesUsed: fallbackSources(fallback.fallbackSourcesUsed)
+        }
+      : null;
+  }
+
+  if (Array.isArray(parsed)) {
+    const body = parsed.filter((item): item is string => typeof item === "string").join("\n\n").trim();
+    return body
+      ? {
+          title: fallback.fallbackTitle,
+          body,
+          sourcesUsed: fallbackSources(fallback.fallbackSourcesUsed)
+        }
+      : null;
+  }
+
+  if (!parsed || typeof parsed !== "object") {
+    return null;
+  }
+
+  const record = parsed as Record<string, unknown>;
+  const body = firstString(record.text, record.commentary, record.body, record.content, record.response);
+  if (!body) {
+    return null;
+  }
+
+  const sources = Array.isArray(record.sourcesUsed)
+    ? record.sourcesUsed.filter((source): source is string => typeof source === "string" && source.trim().length > 0)
+    : fallback.fallbackSourcesUsed;
+
+  return {
+    title: firstString(record.title) ?? fallback.fallbackTitle,
+    body,
+    sourcesUsed: fallbackSources(sources)
+  };
+}
+
+function recoverTextFromMalformedJson(text: string): string | null {
+  const quotedField = /"(?:text|commentary|body|content|response)"\s*:\s*"([\s\S]*)/i.exec(text);
+  if (quotedField?.[1]) {
+    const recovered = trimPartialJsonString(quotedField[1]);
+    if (recovered) {
+      return recovered;
+    }
+  }
+
+  const stripped = text
+    .replace(/^\s*\{+\s*/g, "")
+    .replace(/^\s*"(?:text|commentary|body|content|response)"\s*:\s*/i, "")
+    .replace(/^\s*"/, "")
+    .replace(/["'}\]]+\s*$/g, "")
+    .trim();
+  return /[.!?]\s*(Market commentary only\.)?$/i.test(stripped) && stripped.length >= 20 ? stripped : null;
+}
+
+function trimPartialJsonString(value: string): string | null {
+  const closed = /^((?:\\.|[^"\\])*)"/.exec(value);
+  const partial = (closed?.[1] ?? value)
+    .replace(/["'}\]]+\s*$/g, "")
+    .replace(/\\n/g, "\n")
+    .replace(/\\"/g, "\"")
+    .replace(/\\\\/g, "\\")
+    .trim();
+  return partial.length >= 20 ? partial : null;
+}
+
+function stripMarkdownCodeFence(text: string): string {
+  const trimmed = text.trim();
+  const fenced = /^```(?:json|text|markdown)?\s*([\s\S]*?)\s*```$/i.exec(trimmed);
+  return fenced?.[1]?.trim() ?? trimmed;
+}
+
+function appearsToBeJson(text: string): boolean {
+  const first = text.trim().charAt(0);
+  return first === "{" || first === "[" || first === "\"";
+}
+
+function firstString(...values: unknown[]): string | null {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) {
+      return value.trim();
+    }
+  }
+  return null;
+}
+
+function fallbackSources(sources: string[]): string[] {
+  const cleaned = sources.filter((source) => source.trim().length > 0);
+  return cleaned.length > 0 ? [...new Set(cleaned)] : ["src-market-data"];
+}
+
 function sameDirection(a: number, b: number): boolean {
   return (a >= 0 && b >= 0) || (a <= 0 && b <= 0);
 }
@@ -1392,16 +1592,10 @@ function estimateTokens(text: string): number {
   return Math.ceil(text.length / 4);
 }
 
-function extractJson(text: string): string {
-  const trimmed = text.trim();
-  const fenced = /```(?:json)?\s*([\s\S]*?)```/i.exec(trimmed);
-  if (fenced?.[1]) {
-    return fenced[1].trim();
-  }
-  return trimmed;
-}
-
 function errorMessage(error: unknown): string {
+  if (error instanceof SyntaxError) {
+    return "Gemini response could not be parsed.";
+  }
   if (error instanceof Error) {
     const status = "status" in error ? ` status=${String((error as { status?: unknown }).status)}` : "";
     return sanitizeAiMessage(`${error.message}${status}`);

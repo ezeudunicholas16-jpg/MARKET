@@ -1,6 +1,13 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { FastifyInstance } from "fastify";
+import { AnalysisPipeline, AiUsageTracker, GeminiAnalystWriter, GeminiGenerateClient } from "@market-desk/analysis-engine";
+import { ComplianceEngine } from "@market-desk/compliance";
+import { MarketSnapshotService } from "@market-desk/core";
+import { createMockProviderBundle, ProviderBundle } from "@market-desk/data-providers";
+import { nowIso, SourceRecord } from "@market-desk/shared";
+import { TelegramClient } from "@market-desk/telegram";
 import { buildApp } from "../src/app";
+import { PublishingDraftStore, PublishingService } from "../src/publishing";
 
 describe("GET /why/:symbol", () => {
   let app: FastifyInstance;
@@ -46,4 +53,144 @@ describe("GET /why/:symbol", () => {
     expect(payload.providers.length).toBeGreaterThan(0);
     expect(payload.providers.some((provider) => provider.providerId === "mock")).toBe(true);
   });
+
+  it("/why NVDA with quote data and no confirmed catalyst uses Gemini text successfully", async () => {
+    const tracker = new AiUsageTracker();
+    const providers = noConfirmedCatalystProviders();
+    const compliance = new ComplianceEngine();
+    const telegram = new TelegramClient(undefined, undefined);
+    const pipeline = new AnalysisPipeline(
+      new MarketSnapshotService(providers),
+      undefined,
+      undefined,
+      new GeminiAnalystWriter({
+        client: rawTextGeminiClient([
+          "NVDA is firmer today, but there is no clean confirmed catalyst from available live sources at the time of writing.\n\nThe stock read is mainly about price action against semiconductor and index context, with no company headline, filing, or earnings update confirming the move.\n\nThe next useful evidence would be credible company news, an official filing, or clearer sector follow-through.\n\nMarket commentary only."
+        ]),
+        tracker
+      }),
+      compliance
+    );
+    const draftStore = new PublishingDraftStore();
+    const testApp = await buildApp({
+      services: {
+        snapshots: new MarketSnapshotService(providers),
+        pipeline,
+        compliance,
+        telegram,
+        providers,
+        publishing: new PublishingService({
+          pipeline,
+          telegram,
+          store: draftStore,
+          publishingMode: "approval_required"
+        }),
+        draftStore
+      }
+    });
+
+    try {
+      const response = await testApp.inject({ method: "GET", url: "/why/NVDA?mode=public_telegram" });
+      const payload = response.json() as {
+        draft: { body: string; catalyst: { classification: string } };
+      };
+
+      expect(response.statusCode).toBe(200);
+      expect(payload.draft.catalyst.classification).toBe("no_confirmed_catalyst");
+      expect(payload.draft.body).toContain("NVDA is firmer today");
+      expect(payload.draft.body).toMatch(/Market commentary only\.$/);
+      expect(tracker.today("gemini").filter((record) => record.success).length).toBe(1);
+      expect(tracker.today("gemini").filter((record) => record.fallbackUsed).length).toBe(0);
+    } finally {
+      await testApp.close();
+    }
+  });
 });
+
+function rawTextGeminiClient(responses: string[]): GeminiGenerateClient {
+  return {
+    models: {
+      async generateContent() {
+        return { text: responses.shift() ?? "" };
+      }
+    }
+  };
+}
+
+function noConfirmedCatalystProviders(): ProviderBundle {
+  const base = createMockProviderBundle();
+  const source: SourceRecord = {
+    id: "src-twelve-nvda",
+    provider: "twelve_data",
+    type: "market_data",
+    title: "Twelve Data NVDA quote",
+    retrievedAt: nowIso(),
+    credibilityScore: 85
+  };
+
+  return {
+    ...base,
+    marketData: {
+      ...base.marketData,
+      async getEquityQuote() {
+        return {
+          symbol: "NVDA",
+          assetClass: "equity" as const,
+          price: 100,
+          percentChange: 1.2,
+          volume: 1000000,
+          relativeVolume: 1.05,
+          sourceId: source.id,
+          sourceName: "twelve_data",
+          asOf: nowIso()
+        };
+      },
+      async getIndexMove() {
+        return {
+          symbol: "QQQ",
+          assetClass: "index" as const,
+          price: 500,
+          percentChange: 0,
+          sourceId: "src-index-qqq",
+          sourceName: "twelve_data",
+          asOf: nowIso()
+        };
+      }
+    },
+    sector: {
+      async getSectorForSymbol() {
+        return "Semiconductors";
+      },
+      async getSectorPerformance() {
+        return 0;
+      }
+    },
+    news: {
+      async getLatestNews() {
+        return [];
+      }
+    },
+    filings: {
+      async getLatestFilings() {
+        return [];
+      }
+    },
+    earnings: {
+      async getEarningsContext() {
+        return null;
+      }
+    },
+    sources: {
+      async getSourcesByIds(ids) {
+        return ids.map((id) => ({
+          ...source,
+          id,
+          title: id === source.id ? source.title : "Twelve Data index quote"
+        }));
+      },
+      async getAllSources() {
+        return [source];
+      }
+    }
+  };
+}

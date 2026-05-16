@@ -110,6 +110,88 @@ describe("GeminiAnalystWriter", () => {
     expect(writer.getStatus().recentUsage[0]?.fallbackUsed).toBe(false);
   });
 
+  it("accepts plain text Gemini public commentary as success", async () => {
+    const writer = new GeminiAnalystWriter({
+      client: fakeGeminiClient([publicNvdaText()]),
+      tracker: new AiUsageTracker()
+    });
+
+    const draft = await writer.write(await inputForMode("public_telegram"));
+    const status = writer.getStatus();
+
+    expect(draft.body).toContain("NVDA is firmer today");
+    expect(draft.body).toMatch(/Market commentary only\.$/);
+    expect(status.todaySuccessfulAiCalls).toBe(1);
+    expect(status.todayFallbackCount).toBe(0);
+    expect(status.lastGeminiSuccess).toBe(true);
+    expect(status.lastGeminiRawResponseUsable).toBe(true);
+    expect(status.lastGeminiResponseMode).toBe("text");
+  });
+
+  it("accepts Gemini JSON with a text field as success", async () => {
+    const writer = new GeminiAnalystWriter({
+      client: fakeGeminiClient([{ text: publicNvdaText() }]),
+      tracker: new AiUsageTracker()
+    });
+
+    const draft = await writer.write(await inputForMode("public_telegram"));
+    const status = writer.getStatus();
+
+    expect(draft.body).toContain("semiconductor participation");
+    expect(status.todaySuccessfulAiCalls).toBe(1);
+    expect(status.todayFallbackCount).toBe(0);
+    expect(status.lastGeminiResponseMode).toBe("json");
+  });
+
+  it("parses markdown fenced Gemini JSON successfully", async () => {
+    const fenced = [
+      "```json",
+      JSON.stringify({ text: publicNvdaText() }),
+      "```"
+    ].join("\n");
+    const client = fakeGeminiClient([fenced]);
+    const fencedWriter = new GeminiAnalystWriter({ client, tracker: new AiUsageTracker() });
+
+    const draft = await fencedWriter.write(await inputForMode("public_telegram"));
+    const status = fencedWriter.getStatus();
+
+    expect(draft.body).toContain("NVDA is firmer today");
+    expect(status.lastGeminiResponseMode).toBe("json");
+    expect(status.todayFallbackCount).toBe(0);
+  });
+
+  it("recovers malformed Gemini JSON with usable commentary text", async () => {
+    const malformed = `{"text":"${publicNvdaText()}`;
+    const writer = new GeminiAnalystWriter({
+      client: fakeGeminiClient([malformed]),
+      tracker: new AiUsageTracker()
+    });
+
+    const draft = await writer.write(await inputForMode("public_telegram"));
+    const status = writer.getStatus();
+
+    expect(draft.body).toContain("NVDA is firmer today");
+    expect(status.todaySuccessfulAiCalls).toBe(1);
+    expect(status.todayFallbackCount).toBe(0);
+    expect(status.lastGeminiJsonParseRecovered).toBe(true);
+    expect(status.lastGeminiResponseMode).toBe("text");
+  });
+
+  it("uses template fallback when Gemini response is empty", async () => {
+    const writer = new GeminiAnalystWriter({
+      client: fakeGeminiClient(["   "]),
+      tracker: new AiUsageTracker()
+    });
+
+    const draft = await writer.write(await inputForMode("public_telegram"));
+    const status = writer.getStatus();
+
+    expect(draft.body).toContain("Market commentary only.");
+    expect(status.todaySuccessfulAiCalls).toBe(0);
+    expect(status.todayFallbackCount).toBe(1);
+    expect(status.lastFallbackReason).toBe("Gemini response was empty.");
+  });
+
   it("returns valid public Telegram output from structured Gemini JSON", async () => {
     const writer = new GeminiAnalystWriter({
       client: fakeGeminiClient([
@@ -208,10 +290,19 @@ function fakeGeminiClient(responses: unknown[], error?: Error, onCall?: () => vo
           throw error;
         }
         const response = responses.shift();
-        return { text: JSON.stringify(response) };
+        return { text: typeof response === "string" ? response : JSON.stringify(response) };
       }
     }
   };
+}
+
+function publicNvdaText(): string {
+  return [
+    "NVDA is firmer today as semiconductor participation supports the move.",
+    "The move appears linked to company and sector context, with relative volume giving the reaction more weight than a simple index drift.",
+    "The next test is whether fresh company commentary or sector follow-through confirms the move.",
+    "Market commentary only."
+  ].join("\n\n");
 }
 
 async function inputForMode(mode: AnalysisMode) {

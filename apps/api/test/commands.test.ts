@@ -138,6 +138,9 @@ describe("Telegram command behavior", () => {
 
     expect(result.text).toContain("Last AI call attempted: true");
     expect(result.text).toContain("Last Gemini success: false");
+    expect(result.text).toContain("Last Gemini raw response usable: false");
+    expect(result.text).toContain("Last Gemini JSON parse recovered: false");
+    expect(result.text).toContain("Last Gemini response mode: text");
     expect(result.text).toContain("Last Gemini error: Gemini failed with key=[redacted]");
     expect(result.text).toContain("Last AI fallback reason: Gemini failed with key=[redacted]");
     expect(result.text).not.toContain("test-secret");
