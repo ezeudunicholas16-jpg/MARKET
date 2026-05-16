@@ -180,7 +180,8 @@ describe("Telegram command behavior", () => {
 
     expect(result.text).toContain("Last provider error name: ProviderResponseError");
     expect(result.text).toContain("Last provider endpoint/category: market_data");
-    expect(result.text).toContain("Provider error counts: twelve_data:market_data=2");
+    expect(result.text).toContain("Required quote provider errors: 2");
+    expect(result.text).toContain("Required provider error counts: twelve_data:market_data=2");
     expect(result.text).not.toContain("secret-key");
   });
 });

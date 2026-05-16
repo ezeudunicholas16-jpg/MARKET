@@ -99,6 +99,64 @@ describe("GET /why/:symbol", () => {
       expect(payload.draft.catalyst.classification).toBe("no_confirmed_catalyst");
       expect(payload.draft.body).toContain("NVDA is firmer today");
       expect(payload.draft.body).toMatch(/Market commentary only\.$/);
+      expect(payload.draft.body.split(/\n\s*\n/).length).toBeGreaterThanOrEqual(3);
+      expect(payload.draft.body.split(/\s+/).length).toBeGreaterThanOrEqual(45);
+      expect(payload.draft.body).toMatch(/stock read|sector|index/i);
+      expect(payload.draft.body).toMatch(/next useful evidence|follow-through|what matters next/i);
+      expect(tracker.today("gemini").filter((record) => record.success).length).toBe(1);
+      expect(tracker.today("gemini").filter((record) => record.fallbackUsed).length).toBe(0);
+    } finally {
+      await testApp.close();
+    }
+  });
+
+  it("missing macro provider does not block commodity Gemini commentary", async () => {
+    const tracker = new AiUsageTracker();
+    const providers = commodityWithoutMacroProviders();
+    const compliance = new ComplianceEngine();
+    const telegram = new TelegramClient(undefined, undefined);
+    const pipeline = new AnalysisPipeline(
+      new MarketSnapshotService(providers),
+      undefined,
+      undefined,
+      new GeminiAnalystWriter({
+        client: rawTextGeminiClient([
+          "Gold is little changed rather than directionally weak, with live quote data showing only a small move.\n\nWith no confirmed macro or safe-haven catalyst from the current source set, the cleaner read is consolidation while the market waits for clearer dollar, yield, or inflation evidence.\n\nWhat matters next is DXY, Treasury yields, Fed expectations, incoming inflation data, and whether safe-haven demand starts to show up more clearly.\n\nMarket commentary only."
+        ]),
+        tracker
+      }),
+      compliance
+    );
+    const draftStore = new PublishingDraftStore();
+    const testApp = await buildApp({
+      services: {
+        snapshots: new MarketSnapshotService(providers),
+        pipeline,
+        compliance,
+        telegram,
+        providers,
+        publishing: new PublishingService({
+          pipeline,
+          telegram,
+          store: draftStore,
+          publishingMode: "approval_required"
+        }),
+        draftStore
+      }
+    });
+
+    try {
+      const response = await testApp.inject({ method: "GET", url: "/commodity/GOLD?mode=commodity_reaction" });
+      const payload = response.json() as {
+        draft: { body: string; catalyst: { classification: string } };
+      };
+
+      expect(response.statusCode).toBe(200);
+      expect(payload.draft.catalyst.classification).toBe("no_confirmed_catalyst");
+      expect(payload.draft.body).toMatch(/Gold|GOLD/);
+      expect(payload.draft.body).toContain("little changed");
+      expect(payload.draft.body).toMatch(/DXY|Treasury yields|Fed expectations|inflation/i);
+      expect(payload.draft.body).toMatch(/Market commentary only\.$/);
       expect(tracker.today("gemini").filter((record) => record.success).length).toBe(1);
       expect(tracker.today("gemini").filter((record) => record.fallbackUsed).length).toBe(0);
     } finally {
@@ -187,6 +245,67 @@ function noConfirmedCatalystProviders(): ProviderBundle {
           id,
           title: id === source.id ? source.title : "Twelve Data index quote"
         }));
+      },
+      async getAllSources() {
+        return [source];
+      }
+    }
+  };
+}
+
+function commodityWithoutMacroProviders(): ProviderBundle {
+  const base = createMockProviderBundle();
+  const source: SourceRecord = {
+    id: "src-twelve-gold",
+    provider: "twelve_data",
+    type: "market_data",
+    title: "Twelve Data GOLD quote",
+    retrievedAt: nowIso(),
+    credibilityScore: 85
+  };
+
+  return {
+    ...base,
+    marketData: {
+      ...base.marketData,
+      async getCommodityQuote() {
+        return {
+          symbol: "GOLD",
+          assetClass: "commodity" as const,
+          price: 2400,
+          percentChange: 0.05,
+          sourceId: source.id,
+          sourceName: "twelve_data",
+          asOf: nowIso()
+        };
+      }
+    },
+    macro: {
+      async getMacroEvents() {
+        throw new Error("FRED unavailable");
+      },
+      async getDxyContext() {
+        throw new Error("FRED unavailable");
+      },
+      async getYieldContext() {
+        throw new Error("FRED unavailable");
+      },
+      async getCentralBankContext() {
+        throw new Error("FRED unavailable");
+      },
+      async getInventoryContext() {
+        throw new Error("Inventory unavailable");
+      },
+      async getSupplyDemandContext() {
+        throw new Error("Supply-demand unavailable");
+      },
+      async getGeopoliticalContext() {
+        throw new Error("Geopolitical unavailable");
+      }
+    },
+    sources: {
+      async getSourcesByIds(ids) {
+        return ids.map((id) => ({ ...source, id }));
       },
       async getAllSources() {
         return [source];

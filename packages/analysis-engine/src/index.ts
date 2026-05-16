@@ -431,6 +431,7 @@ export interface AiUsageRecord {
   rawResponseUsable?: boolean;
   jsonParseRecovered?: boolean;
   responseMode?: "text" | "json";
+  qualityCheckResult?: PublicOutputQualityResult;
   timestamp: string;
   error?: string;
   fallbackReason?: string;
@@ -454,9 +455,20 @@ export interface AiProviderStatus {
   lastGeminiRawResponseUsable?: boolean;
   lastGeminiJsonParseRecovered?: boolean;
   lastGeminiResponseMode?: "text" | "json";
+  lastQualityCheckResult?: PublicOutputQualityResult;
   lastFallbackReason?: string;
   lastGeminiError?: string;
   geminiConfigured?: boolean;
+}
+
+export interface PublicOutputQualityResult {
+  ok: boolean;
+  wordCount: number;
+  paragraphCount: number;
+  hasInterpretation: boolean;
+  hasWhatMattersNext: boolean;
+  endsWithFooter: boolean;
+  reasons: string[];
 }
 
 export class AiUsageTracker {
@@ -518,7 +530,8 @@ export class OpenAIAnalystWriter implements AnalystWriter {
       lastCallAttempted: false,
       lastGeminiRawResponseUsable: false,
       lastGeminiJsonParseRecovered: false,
-      lastGeminiResponseMode: "text"
+      lastGeminiResponseMode: "text",
+      lastQualityCheckResult: undefined
     };
   }
 
@@ -596,6 +609,7 @@ export class MockAnalystWriter implements AnalystWriter {
       lastGeminiRawResponseUsable: false,
       lastGeminiJsonParseRecovered: false,
       lastGeminiResponseMode: "text",
+      lastQualityCheckResult: undefined,
       lastFallbackReason: "template writer selected"
     };
   }
@@ -775,15 +789,20 @@ export class MockAnalystWriter implements AnalystWriter {
           : `the index read is ${formatMove(snapshot.indexMove)}`;
       return [
         `${input.subject} is ${promptFormatMove(snapshot.percentChange)}. There is no clean confirmed catalyst from available live sources at the time of writing.`,
-        `For the stock read, the available checks are company headlines, filings, earnings context, sector participation, and index direction; none of those is confirming a single driver yet.`,
+        `With no confirmed company-specific catalyst from the current source set, the cleaner read is that the move is being shaped by broader tape pressure, positioning, or sector participation rather than a standalone company event.`,
         `${context}, so the equity move should be framed against broader tape participation rather than treated as a standalone confirmed story.`,
         `For a stronger read, the desk would need a credible headline, filing, earnings update, analyst action, or clearer sector follow-through.`
       ].join("\n\n");
     }
 
     if (snapshot.assetClass === "commodity") {
+      const isGold = /^(GOLD|XAUUSD|XAU\/USD)$/i.test(input.subject);
+      const moveLine =
+        isGold && Math.abs(snapshot.percentChange) < 0.2
+          ? `${input.subject} is little changed rather than directionally weak. There is no clean confirmed catalyst from available live sources at the time of writing.`
+          : `${input.subject} is ${promptFormatMove(snapshot.percentChange)}. There is no clean confirmed catalyst from available live sources at the time of writing.`;
       return [
-        `${input.subject} is ${promptFormatMove(snapshot.percentChange)}. There is no clean confirmed catalyst from available live sources at the time of writing.`,
+        moveLine,
         `For this commodity read, the important checks are the dollar, yields, macro data, inventory data, supply-demand inputs, and geopolitical risk. ${this.cleanPublicEvidence(snapshot.dollarContext.value)}; ${this.cleanPublicEvidence(snapshot.yieldContext.value)}.`,
         `For gold specifically, consolidation around the dollar and yield path matters because the move can look firm without being tied to a clean safe-haven or inflation catalyst.`,
         `A clearer dollar/yield shift, official inventory update, macro release, or credible supply-demand headline would change the confidence level.`
@@ -901,6 +920,7 @@ export class GeminiAnalystWriter implements AnalystWriter {
       lastGeminiRawResponseUsable: last?.rawResponseUsable ?? false,
       lastGeminiJsonParseRecovered: last?.jsonParseRecovered ?? false,
       lastGeminiResponseMode: last?.responseMode ?? "text",
+      lastQualityCheckResult: last?.qualityCheckResult,
       lastFallbackReason: last?.fallbackUsed ? last.fallbackReason : undefined,
       lastGeminiError: lastGeminiError?.error,
       geminiConfigured: Boolean(this.client)
@@ -925,7 +945,20 @@ export class GeminiAnalystWriter implements AnalystWriter {
     }
 
     try {
-      const initial = await this.generateDraft(input);
+      let initial = await this.generateDraft(input);
+      const initialQuality = evaluatePublicOutputQuality(initial.body, input.mode);
+      if (!initialQuality.ok) {
+        const rewrittenForQuality = await this.tryQualityRewrite(input, initial, initialQuality);
+        if (!rewrittenForQuality) {
+          throw new Error(`Gemini output was too shallow: ${initialQuality.reasons.join(", ")}`);
+        }
+        const rewrittenQuality = evaluatePublicOutputQuality(rewrittenForQuality.body, input.mode);
+        if (!rewrittenQuality.ok) {
+          throw new Error(`Gemini rewrite was too shallow: ${rewrittenQuality.reasons.join(", ")}`);
+        }
+        initial = rewrittenForQuality;
+      }
+
       const compliance = new ComplianceEngine().review(initial.body, {
         confidenceScore: input.confidence.score,
         sourceCount: initial.sourcesUsed.length,
@@ -981,8 +1014,13 @@ export class GeminiAnalystWriter implements AnalystWriter {
       publicOutput
         ? "Return plain text commentary only. Do not return JSON, markdown code fences, or labels. End with exactly: Market commentary only."
         : "Return the final note as plain text unless JSON is explicitly easier. If using JSON, keep it simple with a single text field.",
+      publicOutput
+        ? "Minimum quality: at least 45 words, at least 2 paragraphs, an interpretation paragraph, and a final paragraph explaining what matters next."
+        : "Keep the internal note concise but analytical.",
       rewriteBody
-        ? "Rewrite the prior draft to remove compliance/style risk while preserving the evidence-led market read."
+        ? flags.includes("too_shallow")
+          ? "Your previous answer was too shallow. Rewrite as a concise senior market analyst note with context, interpretation, and what matters next."
+          : "Rewrite the prior draft to remove compliance/style risk while preserving the evidence-led market read."
         : "Return a fresh draft.",
       JSON.stringify(
         {
@@ -1037,6 +1075,7 @@ export class GeminiAnalystWriter implements AnalystWriter {
       sourceIds: parsed.sourcesUsed,
       evidenceSummaries: [...promptInput.evidence.map((item) => item.summary), ...promptInput.facts]
     });
+    const qualityCheckResult = evaluatePublicOutputQuality(body, input.mode);
     this.tracker.record({
       providerName: this.providerName,
       model: this.model,
@@ -1047,7 +1086,8 @@ export class GeminiAnalystWriter implements AnalystWriter {
       callAttempted: true,
       rawResponseUsable: normalized.rawResponseUsable,
       jsonParseRecovered: normalized.jsonParseRecovered,
-      responseMode: normalized.responseMode
+      responseMode: normalized.responseMode,
+      qualityCheckResult
     });
     this.logRoute({
       selectedProvider: this.providerName,
@@ -1085,6 +1125,21 @@ export class GeminiAnalystWriter implements AnalystWriter {
     }
   }
 
+  private async tryQualityRewrite(
+    input: AnalystWritingInput,
+    draft: AnalysisDraft,
+    quality: PublicOutputQualityResult
+  ): Promise<AnalysisDraft | null> {
+    try {
+      return await this.generateDraft(input, draft.body, [
+        "too_shallow",
+        ...quality.reasons.map((reason) => `quality: ${reason}`)
+      ]);
+    } catch {
+      return null;
+    }
+  }
+
   private async writeWithFallback(
     input: AnalystWritingInput,
     reason: string,
@@ -1102,6 +1157,7 @@ export class GeminiAnalystWriter implements AnalystWriter {
       rawResponseUsable: false,
       jsonParseRecovered: false,
       responseMode: "text",
+      qualityCheckResult: evaluatePublicOutputQuality(draft.body, input.mode),
       error: sanitizeAiMessage(reason),
       fallbackReason: sanitizeAiMessage(reason)
     });
@@ -1186,7 +1242,8 @@ export class AnalysisPipeline {
       lastCallAttempted: false,
       lastGeminiRawResponseUsable: false,
       lastGeminiJsonParseRecovered: false,
-      lastGeminiResponseMode: "text"
+      lastGeminiResponseMode: "text",
+      lastQualityCheckResult: undefined
     };
   }
 
@@ -1384,6 +1441,70 @@ function normalizeGeminiResponse(
   };
 }
 
+export function evaluatePublicOutputQuality(text: string, mode: AnalysisMode): PublicOutputQualityResult {
+  if (!isPublicMode(mode) || mode === "x_short") {
+    return {
+      ok: true,
+      wordCount: countWords(text),
+      paragraphCount: paragraphCount(text),
+      hasInterpretation: true,
+      hasWhatMattersNext: true,
+      endsWithFooter: true,
+      reasons: []
+    };
+  }
+
+  const words = countWords(text);
+  const paragraphs = paragraphCount(text);
+  const hasInterpretation =
+    /\b(cleaner read|appears|looks|suggests|reflects|linked to|shaped by|pressure|participation|positioning|broader tape|sector|index|macro|company-specific|not confirmed)\b/i.test(text);
+  const hasWhatMattersNext =
+    /\b(what matters next|next (test|catalyst|useful evidence|read|focus)|watch|depends on|would need|will be whether|matters because|follow-through|earnings|filings|news|sector breadth|index direction|dxy|yields|fed|inflation|inventories|opec|supply risk)\b/i.test(text);
+  const endsWithFooter = /Market commentary only\.\s*$/i.test(text);
+  const onlyRestatesPrice =
+    /\b(shares?|stock|gold|oil|natural gas|pair|asset)\b/i.test(text) &&
+    /\b(declined|rose|gained|fell|up|down|firmer|softer|little changed)\b/i.test(text) &&
+    !hasInterpretation;
+  const reasons: string[] = [];
+
+  if (paragraphs < 2) {
+    reasons.push("fewer than 2 paragraphs");
+  }
+  if (words < 45) {
+    reasons.push("fewer than 45 words");
+  }
+  if (onlyRestatesPrice) {
+    reasons.push("only restates price movement");
+  }
+  if (!hasInterpretation) {
+    reasons.push("missing interpretation");
+  }
+  if (!hasWhatMattersNext) {
+    reasons.push("missing what matters next");
+  }
+  if (!endsWithFooter) {
+    reasons.push("missing required footer");
+  }
+
+  return {
+    ok: reasons.length === 0,
+    wordCount: words,
+    paragraphCount: paragraphs,
+    hasInterpretation,
+    hasWhatMattersNext,
+    endsWithFooter,
+    reasons
+  };
+}
+
+function countWords(text: string): number {
+  return text.trim().split(/\s+/).filter(Boolean).length;
+}
+
+function paragraphCount(text: string): number {
+  return text.trim().split(/\n\s*\n/).filter((paragraph) => paragraph.trim().length > 0).length;
+}
+
 function responseFromParsedJson(
   parsed: unknown,
   fallback: { fallbackTitle: string; fallbackSourcesUsed: string[] }
@@ -1507,8 +1628,22 @@ function buildGeminiFacts(input: AnalystWritingInput): Record<string, unknown> {
   const base = {
     asset: snapshot.assetClass === "equity" ? snapshot.symbol : snapshot.assetClass === "forex" ? snapshot.pair : snapshot.asset,
     assetType: snapshot.assetClass,
+    normalizedSymbol: snapshot.normalizedSymbol,
+    currentPrice: "price" in snapshot ? snapshot.price ?? null : null,
     priceMove: formatMove(snapshot.percentChange),
     percentChange: snapshot.percentChange,
+    absoluteChange:
+      "price" in snapshot && typeof snapshot.price === "number" && typeof snapshot.previousClose === "number"
+        ? snapshot.price - snapshot.previousClose
+        : null,
+    previousClose: snapshot.previousClose ?? null,
+    open: snapshot.open ?? null,
+    high: snapshot.high ?? null,
+    low: snapshot.low ?? null,
+    timestamp: snapshot.sourceTime ?? snapshot.generatedAt,
+    quoteProvider: snapshot.sourceName ?? null,
+    providerSymbol: snapshot.providerSymbol ?? null,
+    missingDataWarnings: missingDataWarnings(snapshot),
     sources: snapshot.sources.map((source) => ({
       id: source.id,
       provider: source.provider,
@@ -1531,19 +1666,30 @@ function buildGeminiFacts(input: AnalystWritingInput): Record<string, unknown> {
   if (snapshot.assetClass === "equity") {
     return {
       ...base,
+      companyName: snapshot.name ?? null,
+      exchange: snapshot.exchange ?? null,
+      currency: snapshot.currency ?? null,
       volume: snapshot.volume,
+      averageVolume: null,
       relativeVolume: snapshot.relativeVolume,
       sectorContext: {
         sector: snapshot.sector,
         sectorMove: snapshot.sectorMove,
         indexMove: snapshot.indexMove
       },
+      indexContext: {
+        indexMove: snapshot.indexMove
+      },
+      newsAvailable: snapshot.latestNews.length > 0,
+      newsCount: snapshot.latestNews.length,
       newsSummaries: snapshot.latestNews.map((item) => ({
         headline: item.headline,
         summary: item.summary,
         sourceId: item.sourceId,
         publishedAt: item.publishedAt
       })),
+      filingsAvailable: snapshot.latestFilings.length > 0,
+      filingsCount: snapshot.latestFilings.length,
       filings: snapshot.latestFilings.map((filing) => ({
         filingType: filing.filingType,
         title: filing.title,
@@ -1557,6 +1703,13 @@ function buildGeminiFacts(input: AnalystWritingInput): Record<string, unknown> {
   if (snapshot.assetClass === "forex") {
     return {
       ...base,
+      macroAvailable: hasMacroContext(snapshot),
+      macroNotes: [
+        snapshot.dxyContext.value,
+        snapshot.yieldContext.value,
+        snapshot.centralBankContext.value,
+        ...snapshot.macroEvents.map((event) => `${event.name}: consensus ${event.consensus ?? "n/a"}, prior ${event.prior ?? "n/a"}`)
+      ],
       forexMacroContext: {
         dxyContext: snapshot.dxyContext,
         yieldContext: snapshot.yieldContext,
@@ -1568,6 +1721,14 @@ function buildGeminiFacts(input: AnalystWritingInput): Record<string, unknown> {
 
   return {
     ...base,
+    macroAvailable: hasMacroContext(snapshot),
+    macroNotes: [
+      snapshot.dollarContext.value,
+      snapshot.yieldContext.value,
+      snapshot.inventoryContext.value,
+      snapshot.supplyDemandContext.value,
+      snapshot.geopoliticalContext.value
+    ],
     commodityContext: {
       dollarContext: snapshot.dollarContext,
       yieldContext: snapshot.yieldContext,
@@ -1586,6 +1747,59 @@ function complianceRiskLevel(input: AnalystWritingInput): "low" | "medium" | "hi
     return "medium";
   }
   return "low";
+}
+
+function missingDataWarnings(snapshot: MarketSnapshot): string[] {
+  const warnings: string[] = [];
+  if (snapshot.assetClass === "equity") {
+    if (snapshot.latestNews.length === 0) {
+      warnings.push("Company news unavailable or no recent headlines returned.");
+    }
+    if (snapshot.latestFilings.length === 0) {
+      warnings.push("Recent SEC filing context unavailable or no recent filings returned.");
+    }
+    if (snapshot.sector === "Unknown") {
+      warnings.push("Sector context unavailable.");
+    }
+    if (snapshot.indexMove === 0) {
+      warnings.push("Index context unavailable or flat.");
+    }
+  }
+
+  if (snapshot.assetClass === "forex") {
+    if (!hasMacroContext(snapshot)) {
+      warnings.push("Macro context unavailable from optional sources.");
+    }
+    if (snapshot.macroEvents.length === 0) {
+      warnings.push("Macro calendar events unavailable or empty.");
+    }
+  }
+
+  if (snapshot.assetClass === "commodity") {
+    if (!hasMacroContext(snapshot)) {
+      warnings.push("Commodity macro context unavailable from optional sources.");
+    }
+  }
+
+  return warnings;
+}
+
+function hasMacroContext(snapshot: MarketSnapshot): boolean {
+  if (snapshot.assetClass === "equity") {
+    return false;
+  }
+
+  if (snapshot.assetClass === "forex") {
+    return [snapshot.dxyContext, snapshot.yieldContext, snapshot.centralBankContext].some((context) => context.sourceId);
+  }
+
+  return [
+    snapshot.dollarContext,
+    snapshot.yieldContext,
+    snapshot.inventoryContext,
+    snapshot.supplyDemandContext,
+    snapshot.geopoliticalContext
+  ].some((context) => context.sourceId);
 }
 
 function estimateTokens(text: string): number {

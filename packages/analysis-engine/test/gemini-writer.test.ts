@@ -192,6 +192,32 @@ describe("GeminiAnalystWriter", () => {
     expect(status.lastFallbackReason).toBe("Gemini response was empty.");
   });
 
+  it("rewrites shallow Gemini public output once", async () => {
+    let calls = 0;
+    const writer = new GeminiAnalystWriter({
+      client: fakeGeminiClient(
+        [
+          "NVIDIA shares declined 4.42% on volume of 179,993,300.\n\nMarket commentary only.",
+          publicNvdaText()
+        ],
+        undefined,
+        () => {
+          calls += 1;
+        }
+      ),
+      tracker: new AiUsageTracker()
+    });
+
+    const draft = await writer.write(await inputForMode("public_telegram"));
+    const status = writer.getStatus();
+
+    expect(calls).toBe(2);
+    expect(draft.body).toContain("The next test");
+    expect(draft.body.split(/\s+/).length).toBeGreaterThanOrEqual(45);
+    expect(status.todayFallbackCount).toBe(0);
+    expect(status.lastQualityCheckResult?.ok).toBe(true);
+  });
+
   it("returns valid public Telegram output from structured Gemini JSON", async () => {
     const writer = new GeminiAnalystWriter({
       client: fakeGeminiClient([

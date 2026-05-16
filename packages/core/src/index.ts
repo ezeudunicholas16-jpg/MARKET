@@ -3,6 +3,11 @@ import {
   CommoditySnapshot,
   EquitySnapshot,
   ForexSnapshot,
+  MacroContext,
+  MacroEvent,
+  NewsItem,
+  FilingRecord,
+  EarningsContext,
   MarketSnapshot,
   SourceRecord,
   normalizeSymbol,
@@ -26,13 +31,13 @@ export class MarketSnapshotService {
       throw new SnapshotNotFoundError(symbol, "equity");
     }
 
-    const sector = (await this.providers.sector.getSectorForSymbol(symbol)) ?? "Unknown";
+    const sector = (await optionalValue(() => this.providers.sector.getSectorForSymbol(symbol), null)) ?? "Unknown";
     const [sectorMove, indexQuote, latestNews, latestFilings, earningsContext] = await Promise.all([
-      this.providers.sector.getSectorPerformance(sector),
-      this.providers.marketData.getIndexMove(symbol === "NVDA" ? "QQQ" : "SPY"),
-      this.providers.news.getLatestNews({ symbol, assetClass: "equity", limit: 5 }),
-      this.providers.filings.getLatestFilings(symbol),
-      this.providers.earnings.getEarningsContext(symbol)
+      optionalValue(() => this.providers.sector.getSectorPerformance(sector), 0),
+      optionalValue(() => this.providers.marketData.getIndexMove(symbol === "NVDA" ? "QQQ" : "SPY"), null),
+      optionalArray<NewsItem>(() => this.providers.news.getLatestNews({ symbol, assetClass: "equity", limit: 5 })),
+      optionalArray<FilingRecord>(() => this.providers.filings.getLatestFilings(symbol)),
+      optionalValue<EarningsContext | null>(() => this.providers.earnings.getEarningsContext(symbol), null)
     ]);
 
     const sourceIds = [
@@ -81,10 +86,10 @@ export class MarketSnapshotService {
     }
 
     const [dxyContext, yieldContext, centralBankContext, macroEvents] = await Promise.all([
-      this.providers.macro.getDxyContext(),
-      this.providers.macro.getYieldContext(),
-      this.providers.macro.getCentralBankContext(pair),
-      this.providers.macro.getMacroEvents("forex")
+      optionalValue(() => this.providers.macro.getDxyContext(), unavailableContext("DXY", "DXY context unavailable.")),
+      optionalValue(() => this.providers.macro.getYieldContext(), unavailableContext("U.S. yields", "Yield context unavailable.")),
+      optionalValue(() => this.providers.macro.getCentralBankContext(pair), unavailableContext(`${pair} central-bank context`, "Central-bank context unavailable.")),
+      optionalArray<MacroEvent>(() => this.providers.macro.getMacroEvents("forex"))
     ]);
 
     const sourceIds = [
@@ -129,11 +134,11 @@ export class MarketSnapshotService {
 
     const [dollarContext, yieldContext, inventoryContext, supplyDemandContext, geopoliticalContext] =
       await Promise.all([
-        this.providers.macro.getDxyContext(),
-        this.providers.macro.getYieldContext(),
-        this.providers.macro.getInventoryContext(asset),
-        this.providers.macro.getSupplyDemandContext(asset),
-        this.providers.macro.getGeopoliticalContext(asset)
+        optionalValue(() => this.providers.macro.getDxyContext(), unavailableContext("DXY", "DXY context unavailable.")),
+        optionalValue(() => this.providers.macro.getYieldContext(), unavailableContext("U.S. yields", "Yield context unavailable.")),
+        optionalValue(() => this.providers.macro.getInventoryContext(asset), unavailableContext(`${asset} inventory context`, "Inventory context unavailable.")),
+        optionalValue(() => this.providers.macro.getSupplyDemandContext(asset), unavailableContext(`${asset} supply-demand context`, "Supply-demand context unavailable.")),
+        optionalValue(() => this.providers.macro.getGeopoliticalContext(asset), unavailableContext(`${asset} geopolitical context`, "Geopolitical context unavailable."))
       ]);
 
     const sourceIds = [
@@ -186,6 +191,52 @@ export class MarketSnapshotService {
 
   private async sources(sourceIds: string[]): Promise<SourceRecord[]> {
     const uniqueIds = [...new Set(sourceIds)];
-    return this.providers.sources.getSourcesByIds(uniqueIds);
+    try {
+      const sources = await this.providers.sources.getSourcesByIds(uniqueIds);
+      const existing = new Set(sources.map((source) => source.id));
+      return [
+        ...sources,
+        ...uniqueIds.filter((id) => !existing.has(id)).map((id) => fallbackSource(id))
+      ];
+    } catch {
+      return uniqueIds.map((id) => fallbackSource(id));
+    }
   }
+}
+
+async function optionalValue<T>(call: () => Promise<T>, fallback: T): Promise<T> {
+  try {
+    return await call();
+  } catch {
+    return fallback;
+  }
+}
+
+async function optionalArray<T>(call: () => Promise<T[]>): Promise<T[]> {
+  try {
+    return await call();
+  } catch {
+    return [];
+  }
+}
+
+function unavailableContext(label: string, value: string): MacroContext {
+  return {
+    label,
+    value,
+    bias: "neutral",
+    asOf: nowIso(),
+    sourceId: undefined
+  };
+}
+
+function fallbackSource(id: string): SourceRecord {
+  return {
+    id,
+    provider: id.includes("twelve") ? "twelve_data" : "provider-router",
+    type: id.includes("warning") ? "internal" : "market_data",
+    title: id.includes("warning") ? "Optional live source warning" : `Live source ${id}`,
+    retrievedAt: nowIso(),
+    credibilityScore: id.includes("warning") ? 100 : 75
+  };
 }

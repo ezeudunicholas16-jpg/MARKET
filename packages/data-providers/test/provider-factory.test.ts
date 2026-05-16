@@ -83,6 +83,19 @@ describe("createProviderBundleFromEnv", () => {
     await expect(bundle.marketData.getEquityQuote("NVDA")).rejects.toBeInstanceOf(ProviderConfigError);
   });
 
+  it("tracks missing optional source data as a warning, not a provider error", async () => {
+    const bundle = createProviderBundleFromEnv({ NODE_ENV: "production", NEWS_PROVIDER: "finnhub" }, createMockProviderBundle());
+
+    const news = await bundle.news.getLatestNews({ symbol: "NVDA", assetClass: "equity" });
+    const routerHealth = bundle.health?.getProviderHealth().find((item) => item.providerId === "provider-router");
+
+    expect(news).toEqual([]);
+    expect(routerHealth?.failedRequestCount).toBe(0);
+    expect(routerHealth?.lastErrorName).toBeUndefined();
+    expect(routerHealth?.optionalSourceWarningCount).toBeGreaterThan(0);
+    expect(routerHealth?.lastOptionalSourceWarning).toBeTruthy();
+  });
+
   it("maps key Twelve Data symbols", () => {
     expect(mapSymbolForTwelveData("NVDA", "equity").candidates[0]).toBe("NVDA");
     expect(mapSymbolForTwelveData("EURUSD", "forex").candidates[0]).toBe("EUR/USD");

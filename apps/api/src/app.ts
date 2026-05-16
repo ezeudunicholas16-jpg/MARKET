@@ -170,6 +170,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
       requestedAsset: params.asset,
       detectedAssetType: assetType,
       quoteFound,
+      quoteProviderOk: quoteFound,
       selectedProvider: debugRecord?.selectedProvider ?? process.env.MARKET_DATA_PROVIDER ?? "provider_router",
       normalizedSymbol: debugRecord?.normalizedSymbol ?? quote?.providerSymbol ?? quote?.symbol,
       providerResponseStatus: debugRecord?.providerRequestStatus ?? (quote ? "ok" : "not_found"),
@@ -192,6 +193,10 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
         : null),
       sourceTimestamps: quote?.asOf ? [quote.asOf] : [],
       providerErrors: services.providers.health?.getProviderHealth().map((item) => item.message).filter(Boolean) ?? [],
+      fatalProviderError: !quoteFound,
+      optionalNewsWarning: optionalNewsWarning(snapshot, assetType),
+      optionalMacroWarning: optionalMacroWarning(snapshot, assetType),
+      optionalFilingsWarning: optionalFilingsWarning(snapshot, assetType),
       newsChecked: contextCounts.newsChecked,
       newsCount: contextCounts.newsCount,
       macroChecked: contextCounts.macroChecked,
@@ -200,6 +205,10 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
       catalystConfidence: confidence?.score ?? null,
       geminiEligible,
       geminiWouldBeCalled,
+      geminiFactsPayloadPreview: snapshot && confidence
+        ? geminiFactsPayloadPreview(snapshot, catalysts[0]?.label ?? "unavailable", confidence.score)
+        : null,
+      qualityCheckResult: aiStatus.lastQualityCheckResult ?? null,
       fallbackReason: geminiWouldBeCalled
         ? null
         : debugFallbackReason({ quoteFound, assetType, snapshotFound: Boolean(snapshot), aiStatus, geminiDailyLimitReached })
@@ -521,6 +530,112 @@ function debugFallbackReason(input: {
     return "daily Gemini generation limit reached";
   }
   return null;
+}
+
+function optionalNewsWarning(snapshot: MarketSnapshot | null, assetType: DebugAssetType): string | null {
+  if (assetType !== "equity") {
+    return null;
+  }
+  if (!snapshot || snapshot.assetClass !== "equity" || snapshot.latestNews.length === 0) {
+    return "Finnhub news unavailable or no recent company news returned.";
+  }
+  return null;
+}
+
+function optionalMacroWarning(snapshot: MarketSnapshot | null, assetType: DebugAssetType): string | null {
+  if (assetType !== "forex" && assetType !== "commodity") {
+    return null;
+  }
+  if (!snapshot) {
+    return "Macro context unavailable.";
+  }
+  if (snapshot.assetClass === "forex") {
+    return [snapshot.dxyContext, snapshot.yieldContext, snapshot.centralBankContext].some((context) => context.sourceId)
+      ? null
+      : "FRED macro context unavailable.";
+  }
+  if (snapshot.assetClass === "commodity") {
+    return [
+      snapshot.dollarContext,
+      snapshot.yieldContext,
+      snapshot.inventoryContext,
+      snapshot.supplyDemandContext,
+      snapshot.geopoliticalContext
+    ].some((context) => context.sourceId)
+      ? null
+      : "Commodity macro context unavailable.";
+  }
+  return null;
+}
+
+function optionalFilingsWarning(snapshot: MarketSnapshot | null, assetType: DebugAssetType): string | null {
+  if (assetType !== "equity") {
+    return null;
+  }
+  if (!snapshot || snapshot.assetClass !== "equity" || snapshot.latestFilings.length === 0) {
+    return "SEC filing context unavailable or no recent filings returned.";
+  }
+  return null;
+}
+
+function geminiFactsPayloadPreview(snapshot: MarketSnapshot, catalystLabel: string, catalystConfidence: number): Record<string, unknown> {
+  const base = {
+    asset: snapshot.assetClass === "equity" ? snapshot.symbol : snapshot.assetClass === "forex" ? snapshot.pair : snapshot.asset,
+    assetType: snapshot.assetClass,
+    normalizedSymbol: snapshot.normalizedSymbol,
+    price: "price" in snapshot ? snapshot.price ?? null : null,
+    percentChange: snapshot.percentChange,
+    previousClose: snapshot.previousClose ?? null,
+    open: snapshot.open ?? null,
+    high: snapshot.high ?? null,
+    low: snapshot.low ?? null,
+    timestamp: snapshot.sourceTime ?? snapshot.generatedAt,
+    quoteProvider: snapshot.sourceName ?? null,
+    catalystLabel,
+    catalystConfidence,
+    sourceList: snapshot.sources.map((source) => ({ id: source.id, provider: source.provider, type: source.type }))
+  };
+
+  if (snapshot.assetClass === "equity") {
+    return {
+      ...base,
+      companyName: snapshot.name ?? null,
+      exchange: snapshot.exchange ?? null,
+      volume: snapshot.volume,
+      relativeVolume: snapshot.relativeVolume,
+      sectorContext: { sector: snapshot.sector, sectorMove: snapshot.sectorMove, indexMove: snapshot.indexMove },
+      newsAvailable: snapshot.latestNews.length > 0,
+      newsCount: snapshot.latestNews.length,
+      filingsAvailable: snapshot.latestFilings.length > 0,
+      filingsCount: snapshot.latestFilings.length
+    };
+  }
+
+  if (snapshot.assetClass === "forex") {
+    return {
+      ...base,
+      macroAvailable: [snapshot.dxyContext, snapshot.yieldContext, snapshot.centralBankContext].some((context) => context.sourceId),
+      macroNotes: [snapshot.dxyContext.value, snapshot.yieldContext.value, snapshot.centralBankContext.value]
+    };
+  }
+
+  return {
+    ...base,
+    macroAvailable: [
+      snapshot.dollarContext,
+      snapshot.yieldContext,
+      snapshot.inventoryContext,
+      snapshot.supplyDemandContext,
+      snapshot.geopoliticalContext
+    ].some((context) => context.sourceId),
+    macroNotes: [
+      snapshot.dollarContext.value,
+      snapshot.yieldContext.value,
+      snapshot.inventoryContext.value,
+      snapshot.supplyDemandContext.value,
+      snapshot.geopoliticalContext.value
+    ]
+  };
 }
 
 function sanitizeDebugMessage(message: string): string {

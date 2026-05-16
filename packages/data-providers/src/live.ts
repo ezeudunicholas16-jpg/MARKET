@@ -51,6 +51,8 @@ export interface ProviderHealthStatus {
   message?: string;
   lastErrorName?: string;
   endpointCategory?: ProviderCategory;
+  optionalSourceWarningCount?: number;
+  lastOptionalSourceWarning?: string;
 }
 
 export interface ProviderHealthReporter {
@@ -1581,19 +1583,30 @@ export class FallbackMarketDataProvider implements MarketDataProvider {
   ) {}
 
   getEquityQuote(symbol: string): Promise<Quote | null> {
-    return firstResult(this.providers, (provider) => provider.getEquityQuote(symbol), this.health);
+    return firstResult(this.providers, (provider) => provider.getEquityQuote(symbol), this.health, {
+      required: true,
+      warning: `${normalizeSymbol(symbol)} quote unavailable from required market data providers.`
+    });
   }
 
   getForexQuote(pair: string): Promise<Quote | null> {
-    return firstResult(this.providers, (provider) => provider.getForexQuote(pair), this.health);
+    return firstResult(this.providers, (provider) => provider.getForexQuote(pair), this.health, {
+      required: true,
+      warning: `${normalizeSymbol(pair)} quote unavailable from required market data providers.`
+    });
   }
 
   getCommodityQuote(asset: string): Promise<Quote | null> {
-    return firstResult(this.providers, (provider) => provider.getCommodityQuote(asset), this.health);
+    return firstResult(this.providers, (provider) => provider.getCommodityQuote(asset), this.health, {
+      required: true,
+      warning: `${normalizeSymbol(asset)} quote unavailable from required market data providers.`
+    });
   }
 
   getIndexMove(symbol: string): Promise<Quote | null> {
-    return firstResult(this.providers, (provider) => provider.getIndexMove(symbol), this.health);
+    return firstResult(this.providers, (provider) => provider.getIndexMove(symbol), this.health, {
+      warning: `${normalizeSymbol(symbol)} index context unavailable.`
+    });
   }
 
   async getMovers(limit?: number): Promise<Quote[]> {
@@ -1746,10 +1759,18 @@ export class FallbackSectorProvider implements SectorProvider {
 }
 
 export class ProviderRouterHealth implements ProviderHealthReporter {
-  private missingLiveDataWarnings = 0;
+  private requiredProviderErrors = 0;
+  private optionalSourceWarnings = 0;
+  private lastOptionalSourceWarning?: string;
 
-  noteMissingLiveData(): void {
-    this.missingLiveDataWarnings += 1;
+  noteMissingLiveData(message = "Optional live source returned no usable data."): void {
+    this.optionalSourceWarnings += 1;
+    this.lastOptionalSourceWarning = message;
+  }
+
+  noteRequiredProviderError(message = "Required quote provider returned no usable data."): void {
+    this.requiredProviderErrors += 1;
+    this.lastOptionalSourceWarning = message;
   }
 
   getProviderHealth(): ProviderHealthStatus[] {
@@ -1760,15 +1781,19 @@ export class ProviderRouterHealth implements ProviderHealthReporter {
         category: "sources",
         configured: true,
         enabled: true,
-        failedRequestCount: this.missingLiveDataWarnings,
+        failedRequestCount: this.requiredProviderErrors,
         rateLimitStatus: "ok",
-        staleDataWarning: this.missingLiveDataWarnings > 0,
-        status: this.missingLiveDataWarnings > 0 ? "degraded" : "ok",
-        lastErrorName: this.missingLiveDataWarnings > 0 ? "ProviderNotFoundError" : undefined,
+        staleDataWarning: this.optionalSourceWarnings > 0 || this.requiredProviderErrors > 0,
+        status: this.requiredProviderErrors > 0 ? "degraded" : this.optionalSourceWarnings > 0 ? "degraded" : "ok",
+        lastErrorName: this.requiredProviderErrors > 0 ? "ProviderNotFoundError" : undefined,
         endpointCategory: "sources",
+        optionalSourceWarningCount: this.optionalSourceWarnings,
+        lastOptionalSourceWarning: this.lastOptionalSourceWarning,
         message:
-          this.missingLiveDataWarnings > 0
-            ? "One or more live provider calls returned no usable data; mock fallback is allowed only in development/test."
+          this.requiredProviderErrors > 0
+            ? "Required quote provider returned no usable data."
+            : this.optionalSourceWarnings > 0
+              ? this.lastOptionalSourceWarning
             : "Provider priority routing is healthy."
       }
     ];
@@ -1923,7 +1948,8 @@ function isMockFallbackAllowed(env: ProviderFactoryEnv): boolean {
 async function firstResult<TProvider, TResult>(
   providers: TProvider[],
   call: (provider: TProvider) => Promise<TResult | null>,
-  health: ProviderRouterHealth
+  health: ProviderRouterHealth,
+  options: { required?: boolean; warning?: string } = {}
 ): Promise<TResult | null> {
   let lastError: unknown;
   for (const provider of providers) {
@@ -1939,7 +1965,11 @@ async function firstResult<TProvider, TResult>(
   if (lastError && providers.length > 0) {
     throw lastError;
   }
-  health.noteMissingLiveData();
+  if (options.required) {
+    health.noteRequiredProviderError(options.warning);
+  } else {
+    health.noteMissingLiveData(options.warning);
+  }
   return null;
 }
 
@@ -1948,19 +1978,15 @@ async function firstArray<TProvider, TResult>(
   call: (provider: TProvider) => Promise<TResult[]>,
   health: ProviderRouterHealth
 ): Promise<TResult[]> {
-  let lastError: unknown;
   for (const provider of providers) {
     try {
       const result = await call(provider);
       if (result.length > 0) {
         return result;
       }
-    } catch (error) {
-      lastError = error;
+    } catch {
+      // Optional providers should not block quote-led analysis.
     }
-  }
-  if (lastError && providers.length > 0) {
-    throw lastError;
   }
   health.noteMissingLiveData();
   return [];
@@ -1971,19 +1997,15 @@ async function firstNumber<TProvider>(
   call: (provider: TProvider) => Promise<number>,
   health: ProviderRouterHealth
 ): Promise<number> {
-  let lastError: unknown;
   for (const provider of providers) {
     try {
       const result = await call(provider);
       if (result !== 0) {
         return result;
       }
-    } catch (error) {
-      lastError = error;
+    } catch {
+      // Optional providers should not block quote-led analysis.
     }
-  }
-  if (lastError && providers.length > 0) {
-    throw lastError;
   }
   health.noteMissingLiveData();
   return 0;
@@ -1995,21 +2017,17 @@ async function firstContext<TProvider>(
   health: ProviderRouterHealth,
   label: string
 ): Promise<MacroContext> {
-  let lastError: unknown;
   for (const provider of providers) {
     try {
       const result = await call(provider);
       if (result.sourceId !== LIVE_WARNING_SOURCE.id) {
         return result;
       }
-    } catch (error) {
-      lastError = error;
+    } catch {
+      // Optional macro providers should return unavailable context instead of failing analysis.
     }
   }
-  if (lastError && providers.length > 0) {
-    throw lastError;
-  }
-  health.noteMissingLiveData();
+  health.noteMissingLiveData(`${label} unavailable from optional live sources.`);
   return liveNoCatalystContext(label, "There is no clean confirmed catalyst from available live sources at the time of writing.");
 }
 

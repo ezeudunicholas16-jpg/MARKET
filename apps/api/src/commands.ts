@@ -92,8 +92,10 @@ export async function handleTelegramCommand(
 function statusText(context: CommandContext): string {
   const ai = context.pipeline.getAiStatus();
   const health = context.providerHealth?.getProviderHealth() ?? [];
-  const providerErrorCount = health.reduce((total, item) => total + item.failedRequestCount, 0);
+  const requiredProviderErrorCount = requiredProviderErrors(health);
+  const optionalWarnings = optionalSourceWarnings(health);
   const lastProviderError = latestProviderError(health);
+  const lastOptionalWarning = latestOptionalSourceWarning(health);
   return [
     "Market Desk Engine is online.",
     `Render/public URL: ${process.env.API_PUBLIC_URL || "not configured"}`,
@@ -121,11 +123,13 @@ function statusText(context: CommandContext): string {
     `Last Gemini response mode: ${ai.lastGeminiResponseMode ?? "text"}`,
     `Last AI fallback reason: ${ai.lastFallbackReason ?? "none"}`,
     `Last Gemini error: ${ai.lastGeminiError ?? "none"}`,
-    `Today's provider errors: ${providerErrorCount}`,
+    `Required quote provider errors: ${requiredProviderErrorCount}`,
+    `Optional source warnings: ${optionalWarnings}`,
+    `Last optional source warning: ${lastOptionalWarning ?? "none"}`,
     `Last provider error name: ${lastProviderError?.lastErrorName ?? "none"}`,
     `Last provider error message: ${lastProviderError?.message ? sanitizeStatusMessage(lastProviderError.message) : "none"}`,
     `Last provider endpoint/category: ${lastProviderError?.endpointCategory ?? "none"}`,
-    `Provider error counts: ${providerErrorCounts(health)}`,
+    `Required provider error counts: ${providerErrorCounts(health)}`,
     `Publishing mode: ${process.env.PUBLISHING_MODE ?? "approval_required"}`,
     `Scheduler status: ${process.env.ENABLE_SCHEDULER === "true" ? "enabled" : "paused"}`
   ].join("\n");
@@ -133,16 +137,40 @@ function statusText(context: CommandContext): string {
 
 function latestProviderError(health: ProviderHealthStatus[]): ProviderHealthStatus | undefined {
   return health
-    .filter((item) => item.failedRequestCount > 0 || item.status === "down")
+    .filter((item) => item.category === "market_data" && (item.failedRequestCount > 0 || item.status === "down"))
     .sort((a, b) => Date.parse(b.lastFailedRequestAt ?? "") - Date.parse(a.lastFailedRequestAt ?? ""))
     .at(0);
 }
 
 function providerErrorCounts(health: ProviderHealthStatus[]): string {
   const counts = health
-    .filter((item) => item.failedRequestCount > 0)
+    .filter((item) => item.category === "market_data" && item.failedRequestCount > 0)
     .map((item) => `${item.providerId}=${item.failedRequestCount}`);
   return counts.length ? counts.join(", ") : "none";
+}
+
+function requiredProviderErrors(health: ProviderHealthStatus[]): number {
+  return health
+    .filter((item) => item.category === "market_data")
+    .reduce((total, item) => total + item.failedRequestCount, 0);
+}
+
+function optionalSourceWarnings(health: ProviderHealthStatus[]): number {
+  return health.reduce((total, item) => {
+    if (item.category === "market_data") {
+      return total;
+    }
+    return total + (item.optionalSourceWarningCount ?? 0) + item.failedRequestCount;
+  }, 0);
+}
+
+function latestOptionalSourceWarning(health: ProviderHealthStatus[]): string | undefined {
+  const warnings = health
+    .filter((item) => item.category !== "market_data")
+    .map((item) => item.lastOptionalSourceWarning ?? item.message)
+    .filter((warning): warning is string => Boolean(warning))
+    .filter((warning) => !/healthy/i.test(warning));
+  return warnings.at(-1);
 }
 
 function sanitizeStatusMessage(message: string): string {
