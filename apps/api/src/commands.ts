@@ -1,6 +1,6 @@
 import { AnalysisPipeline, AnalysisResult } from "@market-desk/analysis-engine";
 import { ComplianceEngine, ensurePublicDisclaimer } from "@market-desk/compliance";
-import { MarketDataProvider, ProviderHealthReporter } from "@market-desk/data-providers";
+import { MarketDataProvider, ProviderHealthReporter, ProviderHealthStatus } from "@market-desk/data-providers";
 import { TelegramClient, ParsedTelegramCommand } from "@market-desk/telegram";
 import { PublishingService } from "./publishing";
 
@@ -92,7 +92,8 @@ export async function handleTelegramCommand(
 function statusText(context: CommandContext): string {
   const ai = context.pipeline.getAiStatus();
   const health = context.providerHealth?.getProviderHealth() ?? [];
-  const providerErrors = health.filter((item) => item.status === "degraded" || item.status === "down").length;
+  const providerErrorCount = health.reduce((total, item) => total + item.failedRequestCount, 0);
+  const lastProviderError = latestProviderError(health);
   return [
     "Market Desk Engine is online.",
     `Render/public URL: ${process.env.API_PUBLIC_URL || "not configured"}`,
@@ -107,12 +108,42 @@ function statusText(context: CommandContext): string {
     `AI provider: ${ai.provider}`,
     `Model: ${ai.model}`,
     `Fallback: ${ai.fallbackProvider}`,
+    `Gemini configured: ${ai.geminiConfigured ?? ai.configured}`,
     `Today's AI calls: ${ai.todayAiCalls}/${Number.isFinite(ai.maxGenerationsPerDay) ? ai.maxGenerationsPerDay : "unlimited"}`,
     `Today's fallback count: ${ai.todayFallbackCount}`,
-    `Today's provider errors: ${providerErrors}`,
+    `Last AI provider used: ${ai.lastProviderUsed ?? "none"}`,
+    `Last AI call attempted: ${ai.lastCallAttempted ?? false}`,
+    `Last AI fallback reason: ${ai.lastFallbackReason ?? "none"}`,
+    `Last Gemini error: ${ai.lastGeminiError ?? "none"}`,
+    `Today's provider errors: ${providerErrorCount}`,
+    `Last provider error name: ${lastProviderError?.lastErrorName ?? "none"}`,
+    `Last provider error message: ${lastProviderError?.message ? sanitizeStatusMessage(lastProviderError.message) : "none"}`,
+    `Last provider endpoint/category: ${lastProviderError?.endpointCategory ?? "none"}`,
+    `Provider error counts: ${providerErrorCounts(health)}`,
     `Publishing mode: ${process.env.PUBLISHING_MODE ?? "approval_required"}`,
     `Scheduler status: ${process.env.ENABLE_SCHEDULER === "true" ? "enabled" : "paused"}`
   ].join("\n");
+}
+
+function latestProviderError(health: ProviderHealthStatus[]): ProviderHealthStatus | undefined {
+  return health
+    .filter((item) => item.failedRequestCount > 0 || item.status === "down")
+    .sort((a, b) => Date.parse(b.lastFailedRequestAt ?? "") - Date.parse(a.lastFailedRequestAt ?? ""))
+    .at(0);
+}
+
+function providerErrorCounts(health: ProviderHealthStatus[]): string {
+  const counts = health
+    .filter((item) => item.failedRequestCount > 0)
+    .map((item) => `${item.providerId}=${item.failedRequestCount}`);
+  return counts.length ? counts.join(", ") : "none";
+}
+
+function sanitizeStatusMessage(message: string): string {
+  return message
+    .replace(/(apikey|api_key|token|key)=([^&\s]+)/gi, "$1=[redacted]")
+    .replace(/AIza[0-9A-Za-z_-]{20,}/g, "[redacted-google-api-key]")
+    .slice(0, 300);
 }
 
 function requiredArg(parsed: ParsedTelegramCommand, label: string): string {

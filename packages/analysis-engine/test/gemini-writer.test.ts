@@ -47,6 +47,61 @@ describe("GeminiAnalystWriter", () => {
     expect(draft.body).toContain("Market commentary only.");
     expect(writer.getStatus().todayFallbackCount).toBe(1);
     expect(writer.getStatus().recentUsage[0]?.fallbackUsed).toBe(true);
+    expect(writer.getStatus().lastFallbackReason).toContain("429 rate limit");
+  });
+
+  it("calls Gemini when quote data exists and catalyst is no_confirmed_catalyst", async () => {
+    let calls = 0;
+    const writer = new GeminiAnalystWriter({
+      client: fakeGeminiClient(
+        [
+          {
+            title: "NVDA no confirmed catalyst",
+            body: [
+              "NVDA is firmer today. There is no clean confirmed catalyst from available live sources at the time of writing.",
+              "The equity read should stay anchored to price action, semiconductor participation, and the broader tech tape because no company-specific headline or filing is confirming the move.",
+              "A clearer update would be credible news, a filing, earnings detail, or sector follow-through."
+            ].join("\n\n"),
+            sourcesUsed: ["src-market-mock"]
+          }
+        ],
+        undefined,
+        () => {
+          calls += 1;
+        }
+      ),
+      tracker: new AiUsageTracker()
+    });
+
+    const draft = await writer.write(await inputForMode("no_confirmed_catalyst"));
+
+    expect(calls).toBe(1);
+    expect(draft.body).toContain("NVDA");
+    expect(writer.getStatus().todayAiCalls).toBe(1);
+    expect(writer.getStatus().todayFallbackCount).toBe(0);
+  });
+
+  it("does not use template fallback when Gemini succeeds", async () => {
+    const writer = new GeminiAnalystWriter({
+      client: fakeGeminiClient([
+        {
+          title: "NVDA desk read",
+          body: [
+            "NVDA is firmer today as earnings context and sector participation support the move.",
+            "The move appears linked to data-center demand commentary, with relative volume confirming that the reaction is not just index drift.",
+            "The next test is whether the same evidence keeps showing up in sector follow-through and company commentary."
+          ].join("\n\n"),
+          sourcesUsed: ["src-earnings-nvda"]
+        }
+      ]),
+      tracker: new AiUsageTracker()
+    });
+
+    await writer.write(await inputForMode("public_telegram"));
+
+    expect(writer.getStatus().todayAiCalls).toBe(1);
+    expect(writer.getStatus().todayFallbackCount).toBe(0);
+    expect(writer.getStatus().recentUsage[0]?.fallbackUsed).toBe(false);
   });
 
   it("returns valid public Telegram output from structured Gemini JSON", async () => {
@@ -110,10 +165,11 @@ describe("GeminiAnalystWriter", () => {
   });
 });
 
-function fakeGeminiClient(responses: unknown[], error?: Error): GeminiGenerateClient {
+function fakeGeminiClient(responses: unknown[], error?: Error, onCall?: () => void): GeminiGenerateClient {
   return {
     models: {
       async generateContent() {
+        onCall?.();
         if (error) {
           throw error;
         }

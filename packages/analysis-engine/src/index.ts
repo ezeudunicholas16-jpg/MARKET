@@ -325,6 +325,11 @@ export class CatalystClassifier {
           ? `${snapshot.pair} no confirmed catalyst`
           : `${snapshot.asset} no confirmed catalyst`;
 
+    const evidenceSourceId =
+      hasLiveSourceWarning(snapshot)
+        ? "src-live-source-warning"
+        : snapshot.sources.find((source) => source.type === "market_data")?.id ?? snapshot.sources[0]?.id ?? "src-market-mock";
+
     return this.candidate({
       classification: "no_confirmed_catalyst",
       label,
@@ -332,7 +337,7 @@ export class CatalystClassifier {
       confidenceScore: 35,
       evidence: [
         {
-          sourceId: hasLiveSourceWarning(snapshot) ? "src-live-source-warning" : "src-market-mock",
+          sourceId: evidenceSourceId,
           kind: "market_data",
           summary: "There is no clean confirmed catalyst from available live sources at the time of writing.",
           weight: 0.25
@@ -422,8 +427,10 @@ export interface AiUsageRecord {
   outputTokenEstimate: number;
   success: boolean;
   fallbackUsed: boolean;
+  callAttempted: boolean;
   timestamp: string;
   error?: string;
+  fallbackReason?: string;
 }
 
 export interface AiProviderStatus {
@@ -435,6 +442,11 @@ export interface AiProviderStatus {
   todayFallbackCount: number;
   maxGenerationsPerDay: number;
   recentUsage: AiUsageRecord[];
+  lastProviderUsed?: string;
+  lastCallAttempted?: boolean;
+  lastFallbackReason?: string;
+  lastGeminiError?: string;
+  geminiConfigured?: boolean;
 }
 
 export class AiUsageTracker {
@@ -488,7 +500,9 @@ export class OpenAIAnalystWriter implements AnalystWriter {
       todayAiCalls: 0,
       todayFallbackCount: 0,
       maxGenerationsPerDay: Number.POSITIVE_INFINITY,
-      recentUsage: []
+      recentUsage: [],
+      lastProviderUsed: "openai",
+      lastCallAttempted: false
     };
   }
 
@@ -556,7 +570,10 @@ export class MockAnalystWriter implements AnalystWriter {
       todayAiCalls: 0,
       todayFallbackCount: 0,
       maxGenerationsPerDay: Number.POSITIVE_INFINITY,
-      recentUsage: []
+      recentUsage: [],
+      lastProviderUsed: "template",
+      lastCallAttempted: false,
+      lastFallbackReason: "template writer selected"
     };
   }
 
@@ -727,6 +744,38 @@ export class MockAnalystWriter implements AnalystWriter {
   }
 
   private noConfirmedCatalyst(input: ReturnType<typeof buildAnalystPromptInput>): string {
+    const snapshot = input.snapshot;
+    if (snapshot.assetClass === "equity") {
+      const context =
+        snapshot.sector && snapshot.sector !== "Unknown"
+          ? `${snapshot.sector} context is ${formatMove(snapshot.sectorMove)} and the index read is ${formatMove(snapshot.indexMove)}`
+          : `the index read is ${formatMove(snapshot.indexMove)}`;
+      return [
+        `${input.subject} is ${promptFormatMove(snapshot.percentChange)}. There is no clean confirmed catalyst from available live sources at the time of writing.`,
+        `The useful read is that price action is visible, but the source set does not yet confirm whether the move is stock-specific, sector-led, earnings-related, or macro-driven.`,
+        `${context}, so the equity move should be framed against broader tape participation rather than treated as a standalone confirmed story.`,
+        `For a stronger read, the desk would need a credible headline, filing, earnings update, analyst action, or clearer sector follow-through.`
+      ].join("\n\n");
+    }
+
+    if (snapshot.assetClass === "commodity") {
+      return [
+        `${input.subject} is ${promptFormatMove(snapshot.percentChange)}. There is no clean confirmed catalyst from available live sources at the time of writing.`,
+        `For this commodity read, the important checks are the dollar, yields, inventory data, supply-demand inputs, and geopolitical risk. ${this.cleanPublicEvidence(snapshot.dollarContext.value)}; ${this.cleanPublicEvidence(snapshot.yieldContext.value)}.`,
+        `Without a confirmed inventory, supply, or macro release driving the move, the safer framing is that price action is live but the catalyst is not cleanly sourced.`,
+        `A clearer dollar/yield shift, official inventory update, or credible supply-demand headline would change the confidence level.`
+      ].join("\n\n");
+    }
+
+    if (snapshot.assetClass === "forex") {
+      return [
+        `${input.subject} is ${promptFormatMove(snapshot.percentChange)}. There is no clean confirmed catalyst from available live sources at the time of writing.`,
+        `The FX read should stay anchored to dollar momentum, yields, central-bank expectations, and scheduled macro data. ${this.cleanPublicEvidence(snapshot.dxyContext.value)}; ${this.cleanPublicEvidence(snapshot.yieldContext.value)}.`,
+        `Without a confirmed macro release or central-bank headline, the pair should be described as moving on available price action rather than a clean fundamental catalyst.`,
+        `The next useful evidence would be a data print, policy comment, or clearer DXY/yield confirmation.`
+      ].join("\n\n");
+    }
+
     return [
       `${input.subject} is ${promptFormatMove(promptSnapshotMove(input.snapshot))}. There is no clean confirmed catalyst from available live sources at the time of writing.`,
       `Price action is available, yet the source set does not provide enough support to frame the move as company-specific, macro-driven, earnings-related, or supply-demand driven.`,
@@ -763,7 +812,6 @@ export interface GeminiGenerateClient {
       config: {
         systemInstruction: string;
         responseMimeType: string;
-        responseJsonSchema: unknown;
         maxOutputTokens: number;
         temperature: number;
       };
@@ -807,6 +855,10 @@ export class GeminiAnalystWriter implements AnalystWriter {
 
   getStatus(): AiProviderStatus {
     const today = this.tracker.today(this.providerName);
+    const recentUsage = this.tracker.list().slice(-10);
+    const last = recentUsage.at(-1);
+    const lastFallback = [...recentUsage].reverse().find((record) => record.fallbackUsed);
+    const lastGeminiError = [...recentUsage].reverse().find((record) => !record.success && record.callAttempted);
     return {
       provider: "Gemini",
       model: this.model,
@@ -815,12 +867,24 @@ export class GeminiAnalystWriter implements AnalystWriter {
       todayAiCalls: today.filter((record) => !record.fallbackUsed).length,
       todayFallbackCount: today.filter((record) => record.fallbackUsed).length,
       maxGenerationsPerDay: this.maxGenerationsPerDay,
-      recentUsage: this.tracker.list().slice(-10)
+      recentUsage,
+      lastProviderUsed: last?.providerName ?? this.providerName,
+      lastCallAttempted: last?.callAttempted ?? false,
+      lastFallbackReason: lastFallback?.fallbackReason,
+      lastGeminiError: lastGeminiError?.error,
+      geminiConfigured: Boolean(this.client)
     };
   }
 
   async write(input: AnalystWritingInput): Promise<AnalysisDraft> {
     const promptTokenEstimate = estimateTokens(JSON.stringify(buildGeminiFacts(input)));
+    this.logRoute({
+      selectedProvider: this.providerName,
+      geminiConfigured: Boolean(this.client),
+      callAttempted: Boolean(this.client),
+      success: false,
+      fallbackUsed: false
+    });
     if (!this.client) {
       return this.writeWithFallback(input, "missing Gemini API key", promptTokenEstimate);
     }
@@ -911,7 +975,6 @@ export class GeminiAnalystWriter implements AnalystWriter {
       config: {
         systemInstruction: promptDefinition.systemPrompt,
         responseMimeType: "application/json",
-        responseJsonSchema: promptDefinition.outputJsonSchema,
         maxOutputTokens: this.maxOutputTokensPerRequest,
         temperature: 0.35
       }
@@ -933,6 +996,14 @@ export class GeminiAnalystWriter implements AnalystWriter {
       model: this.model,
       promptTokenEstimate,
       outputTokenEstimate: estimateTokens(body),
+      success: true,
+      fallbackUsed: false,
+      callAttempted: true
+    });
+    this.logRoute({
+      selectedProvider: this.providerName,
+      geminiConfigured: Boolean(this.client),
+      callAttempted: true,
       success: true,
       fallbackUsed: false
     });
@@ -976,9 +1047,37 @@ export class GeminiAnalystWriter implements AnalystWriter {
       outputTokenEstimate: estimateTokens(draft.body),
       success: false,
       fallbackUsed: true,
-      error: reason
+      callAttempted: Boolean(this.client),
+      error: sanitizeAiMessage(reason),
+      fallbackReason: sanitizeAiMessage(reason)
+    });
+    this.logRoute({
+      selectedProvider: this.providerName,
+      geminiConfigured: Boolean(this.client),
+      callAttempted: Boolean(this.client),
+      success: false,
+      fallbackUsed: true,
+      fallbackReason: sanitizeAiMessage(reason)
     });
     return draft;
+  }
+
+  private logRoute(input: {
+    selectedProvider: string;
+    geminiConfigured: boolean;
+    callAttempted: boolean;
+    success: boolean;
+    fallbackUsed: boolean;
+    fallbackReason?: string;
+  }): void {
+    console.info("AI routing", {
+      selectedAiProvider: input.selectedProvider,
+      geminiConfigured: input.geminiConfigured,
+      geminiCallAttempted: input.callAttempted,
+      geminiSuccess: input.success,
+      fallbackUsed: input.fallbackUsed,
+      fallbackReason: input.fallbackReason
+    });
   }
 }
 
@@ -1021,7 +1120,9 @@ export class AnalysisPipeline {
       todayAiCalls: 0,
       todayFallbackCount: 0,
       maxGenerationsPerDay: Number.POSITIVE_INFINITY,
-      recentUsage: []
+      recentUsage: [],
+      lastProviderUsed: "unknown",
+      lastCallAttempted: false
     };
   }
 
@@ -1062,6 +1163,11 @@ export class AnalysisPipeline {
 
 export function createAnalystWriterFromEnv(env: NodeJS.ProcessEnv = process.env): AnalystWriter {
   const provider = (env.AI_PROVIDER ?? "gemini").toLowerCase();
+  console.info("AI provider router", {
+    selectedAiProvider: provider,
+    geminiConfigured: Boolean(env.GEMINI_API_KEY),
+    fallbackProvider: env.AI_FALLBACK_PROVIDER ?? "template"
+  });
   if (provider === "gemini") {
     return new GeminiAnalystWriter({
       apiKey: env.GEMINI_API_KEY,
@@ -1199,9 +1305,16 @@ function extractJson(text: string): string {
 function errorMessage(error: unknown): string {
   if (error instanceof Error) {
     const status = "status" in error ? ` status=${String((error as { status?: unknown }).status)}` : "";
-    return `${error.message}${status}`;
+    return sanitizeAiMessage(`${error.message}${status}`);
   }
   return "Gemini generation failed.";
+}
+
+function sanitizeAiMessage(message: string): string {
+  return message
+    .replace(/(key|api_key|apikey|token)=([^&\s]+)/gi, "$1=[redacted]")
+    .replace(/AIza[0-9A-Za-z_-]{20,}/g, "[redacted-google-api-key]")
+    .slice(0, 500);
 }
 
 function numberFromEnv(value: string | undefined, fallback: number): number {

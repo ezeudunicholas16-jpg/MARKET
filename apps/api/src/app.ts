@@ -3,12 +3,14 @@ import helmet from "@fastify/helmet";
 import rateLimit from "@fastify/rate-limit";
 import {
   AnalysisPipeline,
+  CatalystClassifier,
+  ConfidenceEngine,
   createAnalystWriterFromEnv
 } from "@market-desk/analysis-engine";
 import { ComplianceEngine } from "@market-desk/compliance";
 import { MarketSnapshotService, SnapshotNotFoundError } from "@market-desk/core";
 import { createMockProviderBundle, createProviderBundleFromEnv, detectAssetType, ProviderBundle } from "@market-desk/data-providers";
-import { analysisModeSchema } from "@market-desk/shared";
+import { analysisModeSchema, MarketSnapshot } from "@market-desk/shared";
 import { TelegramClient, extractCallbackData, extractMessageText, parseTelegramCommand } from "@market-desk/telegram";
 import Fastify, { FastifyInstance, FastifyServerOptions } from "fastify";
 import { z } from "zod";
@@ -127,25 +129,43 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     const providerWithDebug = services.providers.marketData as unknown as {
       debugAsset?: (asset: string, refresh?: boolean) => Promise<Record<string, unknown>>;
     };
-    if (providerWithDebug.debugAsset) {
-      return providerWithDebug.debugAsset(params.asset, query.refresh ?? false);
-    }
+    const providerDebug = providerWithDebug.debugAsset
+      ? await providerWithDebug.debugAsset(params.asset, query.refresh ?? false).catch((error) => ({
+          requestedAsset: params.asset,
+          detectedAssetType: assetType,
+          selectedProvider: process.env.MARKET_DATA_PROVIDER ?? "provider_router",
+          providerRequestStatus: "error",
+          providerErrors: [sanitizeDebugMessage(error instanceof Error ? error.message : String(error))]
+        }))
+      : undefined;
+    const debugRecord = providerDebug as Record<string, unknown> | undefined;
 
-    const quote =
-      assetType === "forex"
-        ? await services.providers.marketData.getForexQuote(params.asset)
-        : assetType === "commodity"
-          ? await services.providers.marketData.getCommodityQuote(params.asset)
-          : assetType === "index"
-            ? await services.providers.marketData.getIndexMove(params.asset)
-            : await services.providers.marketData.getEquityQuote(params.asset);
+    const quote = await quoteForDebug(services, params.asset, assetType);
+    const snapshot = await snapshotForDebug(services, params.asset, assetType);
+    const classifier = new CatalystClassifier();
+    const confidenceEngine = new ConfidenceEngine();
+    const catalysts = snapshot ? classifier.classify(snapshot) : [];
+    const confidence = snapshot ? confidenceEngine.score({ ...snapshot, detectedCatalysts: catalysts } as MarketSnapshot, catalysts) : undefined;
+    const aiStatus = services.pipeline.getAiStatus();
+    const quoteFound = Boolean(quote || debugRecord?.sanitizedData || snapshot);
+    const geminiEligible =
+      quoteFound &&
+      assetType !== "index" &&
+      aiStatus.provider.toLowerCase() === "gemini" &&
+      Boolean(aiStatus.geminiConfigured ?? aiStatus.configured);
+    const geminiDailyLimitReached = aiStatus.todayAiCalls >= aiStatus.maxGenerationsPerDay;
+    const geminiWouldBeCalled = geminiEligible && !geminiDailyLimitReached && Boolean(snapshot);
+    const contextCounts = contextCheckCounts(snapshot, assetType);
+
     return {
       requestedAsset: params.asset,
       detectedAssetType: assetType,
-      selectedProvider: process.env.MARKET_DATA_PROVIDER ?? "provider_router",
-      normalizedSymbol: quote?.providerSymbol ?? quote?.symbol,
-      providerRequestStatus: quote ? "ok" : "not_found",
-      sanitizedData: quote
+      quoteFound,
+      selectedProvider: debugRecord?.selectedProvider ?? process.env.MARKET_DATA_PROVIDER ?? "provider_router",
+      normalizedSymbol: debugRecord?.normalizedSymbol ?? quote?.providerSymbol ?? quote?.symbol,
+      providerResponseStatus: debugRecord?.providerRequestStatus ?? (quote ? "ok" : "not_found"),
+      providerRequestStatus: debugRecord?.providerRequestStatus ?? (quote ? "ok" : "not_found"),
+      sanitizedData: debugRecord?.sanitizedData ?? (quote
         ? {
             symbol: quote.symbol,
             providerSymbol: quote.providerSymbol,
@@ -160,9 +180,20 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
             sourceName: quote.sourceName,
             providerStatus: quote.providerStatus
           }
-        : null,
+        : null),
       sourceTimestamps: quote?.asOf ? [quote.asOf] : [],
-      providerErrors: services.providers.health?.getProviderHealth().map((item) => item.message).filter(Boolean) ?? []
+      providerErrors: services.providers.health?.getProviderHealth().map((item) => item.message).filter(Boolean) ?? [],
+      newsChecked: contextCounts.newsChecked,
+      newsCount: contextCounts.newsCount,
+      macroChecked: contextCounts.macroChecked,
+      macroCount: contextCounts.macroCount,
+      catalystLabel: catalysts[0]?.label ?? "unavailable",
+      catalystConfidence: confidence?.score ?? null,
+      geminiEligible,
+      geminiWouldBeCalled,
+      fallbackReason: geminiWouldBeCalled
+        ? null
+        : debugFallbackReason({ quoteFound, assetType, snapshotFound: Boolean(snapshot), aiStatus, geminiDailyLimitReached })
     };
   });
 
@@ -362,6 +393,132 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   });
 
   return app;
+}
+
+type DebugAssetType = ReturnType<typeof detectAssetType>;
+
+async function quoteForDebug(
+  services: MarketDeskServices,
+  asset: string,
+  assetType: DebugAssetType
+) {
+  try {
+    if (assetType === "forex") {
+      return await services.providers.marketData.getForexQuote(asset);
+    }
+    if (assetType === "commodity") {
+      return await services.providers.marketData.getCommodityQuote(asset);
+    }
+    if (assetType === "index") {
+      return await services.providers.marketData.getIndexMove(asset);
+    }
+    return await services.providers.marketData.getEquityQuote(asset);
+  } catch {
+    return null;
+  }
+}
+
+async function snapshotForDebug(
+  services: MarketDeskServices,
+  asset: string,
+  assetType: DebugAssetType
+): Promise<MarketSnapshot | null> {
+  try {
+    if (assetType === "forex") {
+      return await services.snapshots.getForexSnapshot(asset);
+    }
+    if (assetType === "commodity") {
+      return await services.snapshots.getCommoditySnapshot(asset);
+    }
+    if (assetType === "equity") {
+      return await services.snapshots.getEquitySnapshot(asset);
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function contextCheckCounts(snapshot: MarketSnapshot | null, assetType: DebugAssetType): {
+  newsChecked: boolean;
+  newsCount: number;
+  macroChecked: boolean;
+  macroCount: number;
+} {
+  if (!snapshot) {
+    return {
+      newsChecked: assetType === "equity",
+      newsCount: 0,
+      macroChecked: assetType === "forex" || assetType === "commodity",
+      macroCount: 0
+    };
+  }
+
+  if (snapshot.assetClass === "equity") {
+    return {
+      newsChecked: true,
+      newsCount: snapshot.latestNews.length,
+      macroChecked: false,
+      macroCount: 0
+    };
+  }
+
+  if (snapshot.assetClass === "forex") {
+    return {
+      newsChecked: false,
+      newsCount: 0,
+      macroChecked: true,
+      macroCount: [snapshot.dxyContext, snapshot.yieldContext, snapshot.centralBankContext].filter((context) => context.sourceId).length + snapshot.macroEvents.length
+    };
+  }
+
+  return {
+    newsChecked: false,
+    newsCount: 0,
+    macroChecked: true,
+    macroCount: [
+      snapshot.dollarContext,
+      snapshot.yieldContext,
+      snapshot.inventoryContext,
+      snapshot.supplyDemandContext,
+      snapshot.geopoliticalContext
+    ].filter((context) => context.sourceId).length
+  };
+}
+
+function debugFallbackReason(input: {
+  quoteFound: boolean;
+  assetType: DebugAssetType;
+  snapshotFound: boolean;
+  aiStatus: ReturnType<AnalysisPipeline["getAiStatus"]>;
+  geminiDailyLimitReached: boolean;
+}): string | null {
+  if (!input.quoteFound) {
+    return "quote data unavailable";
+  }
+  if (input.assetType === "index") {
+    return "index debug does not generate analyst commentary";
+  }
+  if (input.aiStatus.provider.toLowerCase() !== "gemini") {
+    return `AI provider is ${input.aiStatus.provider}`;
+  }
+  if (!(input.aiStatus.geminiConfigured ?? input.aiStatus.configured)) {
+    return "Gemini is not configured";
+  }
+  if (!input.snapshotFound) {
+    return "snapshot context could not be assembled";
+  }
+  if (input.geminiDailyLimitReached) {
+    return "daily Gemini generation limit reached";
+  }
+  return null;
+}
+
+function sanitizeDebugMessage(message: string): string {
+  return message
+    .replace(/(apikey|api_key|token|key)=([^&\s]+)/gi, "$1=[redacted]")
+    .replace(/AIza[0-9A-Za-z_-]{20,}/g, "[redacted-google-api-key]")
+    .slice(0, 300);
 }
 
 function corsOrigins(): string[] | undefined {

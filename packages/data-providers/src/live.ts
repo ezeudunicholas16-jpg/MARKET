@@ -49,6 +49,8 @@ export interface ProviderHealthStatus {
   staleDataWarning: boolean;
   status: ProviderRuntimeStatus;
   message?: string;
+  lastErrorName?: string;
+  endpointCategory?: ProviderCategory;
 }
 
 export interface ProviderHealthReporter {
@@ -147,6 +149,7 @@ export class ProviderReliabilityTracker implements ProviderHealthReporter {
   private rateLimitResetAt?: string;
   private staleDataWarning = false;
   private message?: string;
+  private lastErrorName?: string;
 
   constructor(
     private readonly input: {
@@ -169,7 +172,8 @@ export class ProviderReliabilityTracker implements ProviderHealthReporter {
   recordFailure(error: unknown): void {
     this.lastFailedRequestAt = nowIso();
     this.failedRequestCount += 1;
-    this.message = error instanceof Error ? error.message : String(error);
+    this.lastErrorName = error instanceof Error ? error.name : "ProviderError";
+    this.message = sanitizeProviderMessage(error instanceof Error ? error.message : String(error));
   }
 
   recordRateLimit(resetAt?: string): void {
@@ -209,7 +213,9 @@ export class ProviderReliabilityTracker implements ProviderHealthReporter {
         rateLimitResetAt: this.rateLimitResetAt,
         staleDataWarning: this.staleDataWarning,
         status,
-        message: this.message
+        message: this.message,
+        lastErrorName: this.lastErrorName,
+        endpointCategory: this.input.category
       }
     ];
   }
@@ -1758,6 +1764,8 @@ export class ProviderRouterHealth implements ProviderHealthReporter {
         rateLimitStatus: "ok",
         staleDataWarning: this.missingLiveDataWarnings > 0,
         status: this.missingLiveDataWarnings > 0 ? "degraded" : "ok",
+        lastErrorName: this.missingLiveDataWarnings > 0 ? "ProviderNotFoundError" : undefined,
+        endpointCategory: "sources",
         message:
           this.missingLiveDataWarnings > 0
             ? "One or more live provider calls returned no usable data; mock fallback is allowed only in development/test."
@@ -2202,6 +2210,12 @@ function sanitizeProviderUrl(url: string): string {
   } catch {
     return url.replace(/(apikey|api_key|token)=([^&\s]+)/gi, "$1=[redacted]");
   }
+}
+
+function sanitizeProviderMessage(message: string): string {
+  return message
+    .replace(/(apikey|api_key|token|key)=([^&\s]+)/gi, "$1=[redacted]")
+    .replace(/AIza[0-9A-Za-z_-]{20,}/g, "[redacted-google-api-key]");
 }
 
 function sanitizeProviderStatus(input: Record<string, unknown>): Record<string, unknown> {
